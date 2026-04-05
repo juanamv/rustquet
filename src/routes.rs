@@ -8,7 +8,7 @@ use crate::models::TelemetryEvent;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub ingest_tx: mpsc::UnboundedSender<IngestCmd>,
+    pub ingest_tx: mpsc::Sender<IngestCmd>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -30,6 +30,7 @@ async fn ingest_handler(
     if let Err(e) = state
         .ingest_tx
         .send(IngestCmd::WriteEvent { event, ack: ack_tx })
+        .await
     {
         eprintln!("[ingest] channel send failed: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;

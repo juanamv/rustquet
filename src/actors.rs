@@ -9,58 +9,29 @@ use crate::storage::{self, ActiveBatch, ActiveBatchStatus};
 // ── Command types ──────────────────────────────────────────────────
 
 pub enum IngestCmd {
-    /// Write an event to RocksDB. The `oneshot::Sender` is used to
-    /// notify the HTTP handler that the write completed.
+    /// Persist a new event to RocksDB and acknowledge the HTTP handler.
     WriteEvent {
         event: TelemetryEvent,
         ack: oneshot::Sender<()>,
     },
-    /// Sent by the ParquetActor after a batch is fully processed.
+    /// Sent by the ParquetActor after the batch was fully finalized.
     BatchDone { next_batch_start_id: u64 },
-    /// Graceful shutdown: flush remaining events to Parquet.
+    /// Graceful shutdown: flush the remaining partial batch.
     #[allow(dead_code)]
     Shutdown,
 }
 
 pub enum ParquetCmd {
-    WriteBatch {
-        batch: ActiveBatch,
-        events: Vec<TelemetryEvent>,
-    },
-    RecoverBatch {
-        batch: ActiveBatch,
-    },
+    ProcessBatch { batch: ActiveBatch },
 }
 
 // ── IngestActor ────────────────────────────────────────────────────
-// Single writer to RocksDB. Receives events from the HTTP handler,
-// persists them, and uses persisted metadata to recover batch state
-// after restart.
+// Single writer to RocksDB. It persists incoming events and only sends
+// a compact batch reference to the ParquetActor. Batch state is stored
+// in RocksDB so the service can resume after restart.
 
-fn dispatch_write_batch(
-    db: &DB,
-    parquet_tx: &mpsc::UnboundedSender<ParquetCmd>,
-    batch: ActiveBatch,
-) -> bool {
-    let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
-        Ok(events) => events,
-        Err(error) => {
-            eprintln!("[ingest] failed to read batch: {error}");
-            return false;
-        }
-    };
-
-    if events.len() != batch.len {
-        eprintln!(
-            "[ingest] expected {} events for batch {}, got {}",
-            batch.len,
-            batch.start_event_id,
-            events.len()
-        );
-        return false;
-    }
-
-    if let Err(error) = parquet_tx.send(ParquetCmd::WriteBatch { batch, events }) {
+async fn dispatch_batch(parquet_tx: &mpsc::Sender<ParquetCmd>, batch: ActiveBatch) -> bool {
+    if let Err(error) = parquet_tx.send(ParquetCmd::ProcessBatch { batch }).await {
         eprintln!("[ingest] failed to send batch to parquet actor: {error}");
         return false;
     }
@@ -68,22 +39,27 @@ fn dispatch_write_batch(
     true
 }
 
-fn dispatch_recovery_batch(
-    parquet_tx: &mpsc::UnboundedSender<ParquetCmd>,
-    batch: ActiveBatch,
-) -> bool {
-    if let Err(error) = parquet_tx.send(ParquetCmd::RecoverBatch { batch }) {
-        eprintln!("[ingest] failed to send recovery batch to parquet actor: {error}");
-        return false;
-    }
+fn pending_batch_len(
+    next_event_id: u64,
+    next_batch_start_id: u64,
+    batch_size: u64,
+    shutting_down: bool,
+) -> usize {
+    let pending_events = next_event_id.saturating_sub(next_batch_start_id);
 
-    true
+    if shutting_down {
+        pending_events as usize
+    } else if pending_events >= batch_size {
+        batch_size as usize
+    } else {
+        0
+    }
 }
 
 pub async fn run_ingest_actor(
     db: Arc<DB>,
-    mut rx: mpsc::UnboundedReceiver<IngestCmd>,
-    parquet_tx: mpsc::UnboundedSender<ParquetCmd>,
+    mut rx: mpsc::Receiver<IngestCmd>,
+    parquet_tx: mpsc::Sender<ParquetCmd>,
     batch_size: u64,
 ) {
     let metadata =
@@ -96,17 +72,15 @@ pub async fn run_ingest_actor(
 
     loop {
         if !parquet_in_flight {
-            if let Some(batch) = active_batch {
-                parquet_in_flight = dispatch_recovery_batch(&parquet_tx, batch);
+            let batch_to_dispatch = if let Some(batch) = active_batch {
+                Some(batch)
             } else {
-                let pending_events = next_event_id.saturating_sub(next_batch_start_id);
-                let batch_len = if shutting_down {
-                    pending_events as usize
-                } else if pending_events >= batch_size {
-                    batch_size as usize
-                } else {
-                    0
-                };
+                let batch_len = pending_batch_len(
+                    next_event_id,
+                    next_batch_start_id,
+                    batch_size,
+                    shutting_down,
+                );
 
                 if batch_len > 0 {
                     let batch = ActiveBatch {
@@ -118,20 +92,28 @@ pub async fn run_ingest_actor(
                     match storage::store_active_batch(&db, batch) {
                         Ok(()) => {
                             active_batch = Some(batch);
-                            parquet_in_flight = dispatch_write_batch(&db, &parquet_tx, batch);
+                            Some(batch)
                         }
                         Err(error) => {
                             eprintln!("[ingest] failed to persist active batch: {error}");
+                            None
                         }
                     }
-                } else if shutting_down {
-                    break;
+                } else {
+                    None
                 }
+            };
+
+            if let Some(batch) = batch_to_dispatch {
+                parquet_in_flight = dispatch_batch(&parquet_tx, batch).await;
+            } else if shutting_down {
+                break;
             }
         }
 
         let Some(cmd) = rx.recv().await else {
-            break;
+            shutting_down = true;
+            continue;
         };
 
         match cmd {
@@ -161,28 +143,25 @@ pub async fn run_ingest_actor(
 }
 
 // ── ParquetActor ───────────────────────────────────────────────────
-// Receives a batch, writes or recovers the Parquet file, then atomically
-// advances RocksDB metadata and deletes the processed keys.
+// Receives a compact batch reference, loads the rows from RocksDB,
+// writes the Parquet file if needed, and then atomically finalizes the
+// batch inside RocksDB.
 
 fn process_batch(
     db: &DB,
-    ingest_tx: &mpsc::UnboundedSender<IngestCmd>,
+    ingest_tx: &mpsc::Sender<IngestCmd>,
     output_dir: &str,
     batch: ActiveBatch,
-    events: Option<Vec<TelemetryEvent>>,
 ) {
     let final_path = crate::parquet::parquet_file_path(output_dir, batch.start_event_id);
 
     if !final_path.exists() {
-        let events = match events {
-            Some(events) => events,
-            None => match storage::read_batch(db, batch.start_event_id, batch.len) {
-                Ok(events) => events,
-                Err(error) => {
-                    eprintln!("[parquet] failed to reload batch from rocksdb: {error}");
-                    return;
-                }
-            },
+        let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
+            Ok(events) => events,
+            Err(error) => {
+                eprintln!("[parquet] failed to read batch from rocksdb: {error}");
+                return;
+            }
         };
 
         if events.len() != batch.len {
@@ -219,35 +198,26 @@ fn process_batch(
         }
     };
 
-    let _ = ingest_tx.send(IngestCmd::BatchDone {
+    let _ = ingest_tx.blocking_send(IngestCmd::BatchDone {
         next_batch_start_id,
     });
 }
 
 pub async fn run_parquet_actor(
     db: Arc<DB>,
-    mut rx: mpsc::UnboundedReceiver<ParquetCmd>,
-    ingest_tx: mpsc::UnboundedSender<IngestCmd>,
+    mut rx: mpsc::Receiver<ParquetCmd>,
+    ingest_tx: mpsc::Sender<IngestCmd>,
     output_dir: String,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            ParquetCmd::WriteBatch { batch, events } => {
+            ParquetCmd::ProcessBatch { batch } => {
                 let db_clone = db.clone();
                 let ingest_tx_clone = ingest_tx.clone();
                 let dir = output_dir.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    process_batch(&db_clone, &ingest_tx_clone, &dir, batch, Some(events));
-                });
-            }
-            ParquetCmd::RecoverBatch { batch } => {
-                let db_clone = db.clone();
-                let ingest_tx_clone = ingest_tx.clone();
-                let dir = output_dir.clone();
-
-                tokio::task::spawn_blocking(move || {
-                    process_batch(&db_clone, &ingest_tx_clone, &dir, batch, None);
+                    process_batch(&db_clone, &ingest_tx_clone, &dir, batch);
                 });
             }
         }

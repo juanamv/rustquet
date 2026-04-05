@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = storage::open_db(config::DB_PATH)?;
 
-    let (ingest_tx, ingest_rx) = mpsc::unbounded_channel();
-    let (parquet_tx, parquet_rx) = mpsc::unbounded_channel();
+    let (ingest_tx, ingest_rx) = mpsc::channel(config::INGEST_CHANNEL_CAPACITY);
+    let (parquet_tx, parquet_rx) = mpsc::channel(config::PARQUET_CHANNEL_CAPACITY);
 
     let db_ingest = db.clone();
     let db_parquet = db.clone();
