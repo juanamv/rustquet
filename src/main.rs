@@ -17,14 +17,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db_ingest = db.clone();
     let db_parquet = db.clone();
 
-    tokio::spawn(actors::run_ingest_actor(db_ingest, ingest_rx, parquet_tx));
+    tokio::spawn(actors::run_ingest_actor(
+        db_ingest,
+        ingest_rx,
+        parquet_tx,
+        config::BATCH_SIZE,
+    ));
     tokio::spawn(actors::run_parquet_actor(
         db_parquet,
         parquet_rx,
         ingest_tx.clone(),
+        config::PARQUET_OUTPUT_DIR.to_string(),
     ));
 
-    let state = routes::AppState { db, ingest_tx };
+    let state = routes::AppState { ingest_tx };
     let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(config::SERVER_ADDR).await?;

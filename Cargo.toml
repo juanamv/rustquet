@@ -3,6 +3,10 @@ name = "rustquet"
 version = "0.1.0"
 edition = "2024"
 
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
 [dependencies]
 tokio = { version = "1.51.0", features = ["full"] }
 axum = "0.8.8"

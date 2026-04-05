@@ -1,16 +1,21 @@
 use std::sync::Arc;
 
-use rocksdb::DB;
-use tokio::sync::mpsc;
+use rocksdb::{DB, WriteBatch};
+use tokio::sync::{mpsc, oneshot};
 
-use crate::config::BATCH_SIZE;
 use crate::models::TelemetryEvent;
 use crate::storage;
 
 // ── Command types ──────────────────────────────────────────────────
 
 pub enum IngestCmd {
-    EventNotified,
+    /// Write an event to RocksDB. The `oneshot::Sender` is used to
+    /// notify the HTTP handler that the write completed.
+    WriteEvent {
+        event: TelemetryEvent,
+        ack: oneshot::Sender<()>,
+    },
+    /// Sent by the ParquetActor after a batch is fully processed.
     BatchDone,
 }
 
@@ -22,44 +27,58 @@ pub enum ParquetCmd {
 }
 
 // ── IngestActor ────────────────────────────────────────────────────
-// Tracks how many events live in RocksDB. When the count reaches
-// BATCH_SIZE it reads the batch and pushes it to the ParquetActor.
+// Single writer to RocksDB.  Receives events from the HTTP handler,
+// persists them, tracks the batch size, and dispatches full batches
+// to the ParquetActor.
+//
+// The counter is a running total (never reset).  Batch boundaries are
+// derived from counter multiples of batch_size.
 
 pub async fn run_ingest_actor(
     db: Arc<DB>,
     mut rx: mpsc::UnboundedReceiver<IngestCmd>,
     parquet_tx: mpsc::UnboundedSender<ParquetCmd>,
+    batch_size: u64,
 ) {
-    let mut counter: u64 = storage::get_counter(&db).expect("failed to read counter from rocksdb");
-    let mut batch_start: u64 = counter.saturating_sub(counter % BATCH_SIZE as u64);
+    let mut counter: u64 = 0u64;
+    let mut next_batch_start: u64 = 0u64;
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            IngestCmd::EventNotified => {
+            IngestCmd::WriteEvent { event, ack } => {
                 counter += 1;
+                let key = format!("event_{:010}", counter);
+                let value = serde_json::to_vec(&event).expect("failed to serialize event");
 
-                if counter.is_multiple_of(BATCH_SIZE as u64) {
-                    let events = match storage::read_batch(&db, batch_start, BATCH_SIZE) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            eprintln!("[ingest] failed to read batch: {e}");
-                            continue;
-                        }
-                    };
+                let mut wb = WriteBatch::default();
+                wb.put(key.as_bytes(), &value);
+                db.write(wb).expect("failed to write event to rocksdb");
+
+                // Notify the HTTP handler that the write succeeded.
+                let _ = ack.send(());
+
+                if counter.is_multiple_of(batch_size) {
+                    let events =
+                        match storage::read_batch(&db, next_batch_start, batch_size as usize) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                eprintln!("[ingest] failed to read batch: {e}");
+                                continue;
+                            }
+                        };
 
                     if let Err(e) = parquet_tx.send(ParquetCmd::ProcessBatch {
                         events,
-                        batch_start,
+                        batch_start: next_batch_start,
                     }) {
                         eprintln!("[ingest] failed to send batch to parquet actor: {e}");
                     }
 
-                    batch_start += BATCH_SIZE as u64;
+                    next_batch_start += batch_size;
                 }
             }
             IngestCmd::BatchDone => {
-                counter = 0;
-                batch_start += BATCH_SIZE as u64;
+                // Acknowledgement only — counter keeps running.
             }
         }
     }
@@ -74,6 +93,7 @@ pub async fn run_parquet_actor(
     db: Arc<DB>,
     mut rx: mpsc::UnboundedReceiver<ParquetCmd>,
     ingest_tx: mpsc::UnboundedSender<IngestCmd>,
+    output_dir: String,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -83,14 +103,15 @@ pub async fn run_parquet_actor(
             } => {
                 let db_clone = db.clone();
                 let ingest_tx_clone = ingest_tx.clone();
+                let dir = output_dir.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    match crate::parquet::write_parquet(&events, batch_start) {
+                    match crate::parquet::write_parquet(&events, batch_start, &dir) {
                         Ok((file, count)) => {
                             println!("[parquet] wrote {count} events -> {file}");
 
                             if let Err(e) =
-                                storage::delete_batch(&db_clone, batch_start, events.len())
+                                storage::delete_batch(&db_clone, batch_start, events.len() + 1)
                             {
                                 eprintln!("[parquet] failed to delete batch: {e}");
                             }

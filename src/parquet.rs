@@ -8,14 +8,14 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::config::PARQUET_OUTPUT_DIR;
 use crate::models::TelemetryEvent;
 
 pub fn write_parquet(
     events: &[TelemetryEvent],
     batch_index: u64,
+    output_dir: &str,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(PARQUET_OUTPUT_DIR)?;
+    std::fs::create_dir_all(output_dir)?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),
@@ -48,7 +48,7 @@ pub fn write_parquet(
 
     let file_name = format!(
         "{}/batch_{:010}_{}.parquet",
-        PARQUET_OUTPUT_DIR,
+        output_dir,
         batch_index,
         uuid::Uuid::now_v7()
     );
@@ -67,4 +67,55 @@ pub fn write_parquet(
     std::fs::write(&file_name, &buf)?;
 
     Ok((file_name, events.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::TelemetryEvent;
+    use parquet::file::reader::FileReader;
+    use parquet::file::serialized_reader::SerializedFileReader;
+
+    fn test_events(n: usize) -> Vec<TelemetryEvent> {
+        (0..n)
+            .map(|i| TelemetryEvent {
+                session_id: format!("sess-{i}"),
+                path: format!("/page/{i}"),
+                event_name: "test_click".into(),
+                timestamp: 1_000_000 + i as i64,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_write_and_read_back_parquet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let events = test_events(10);
+        let (path, count) = write_parquet(&events, 0, dir).unwrap();
+        assert_eq!(count, 10);
+        assert!(std::path::Path::new(&path).exists());
+
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+
+        let mut total_rows = 0usize;
+        for _ in reader.get_row_iter(None).unwrap() {
+            total_rows += 1;
+        }
+        assert_eq!(total_rows, 10);
+    }
+
+    #[test]
+    fn test_parquet_schema_has_four_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let events = test_events(1);
+        let (path, _) = write_parquet(&events, 99, dir).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let schema = reader.metadata().file_metadata().schema();
+        assert_eq!(schema.get_fields().len(), 4);
+    }
 }

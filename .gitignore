@@ -1,3 +1,5 @@
 /target
 AGENTS.md
 /rustquet_data
+/tests
+/parquet_output
