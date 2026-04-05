@@ -1,10 +1,4 @@
-mod actors;
-mod config;
-mod models;
-mod parquet;
-mod routes;
-mod storage;
-
+use rustquet::{actors, config, routes, storage};
 use tokio::sync::mpsc;
 
 #[tokio::main]

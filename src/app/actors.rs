@@ -3,8 +3,8 @@ use std::sync::Arc;
 use rocksdb::DB;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::models::TelemetryEvent;
-use crate::storage::{self, ActiveBatch, ActiveBatchStatus};
+use crate::domain::models::TelemetryEvent;
+use crate::infra::storage::{self, ActiveBatch, ActiveBatchStatus};
 
 // ── Command types ──────────────────────────────────────────────────
 
@@ -153,7 +153,7 @@ fn process_batch(
     output_dir: &str,
     batch: ActiveBatch,
 ) {
-    let final_path = crate::parquet::parquet_file_path(output_dir, batch.start_event_id);
+    let final_path = crate::infra::parquet::parquet_file_path(output_dir, batch.start_event_id);
 
     if !final_path.exists() {
         let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
@@ -174,7 +174,7 @@ fn process_batch(
             return;
         }
 
-        match crate::parquet::write_parquet(&events, batch.start_event_id, output_dir) {
+        match crate::infra::parquet::write_parquet(&events, batch.start_event_id, output_dir) {
             Ok((file, count)) => {
                 println!("[parquet] wrote {count} events -> {file}");
             }

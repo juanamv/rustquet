@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rocksdb::{DB, Options, WriteBatch};
 
-use crate::models::TelemetryEvent;
+use crate::domain::models::TelemetryEvent;
 
 const NEXT_EVENT_ID_KEY: &str = "__meta_next_event_id";
 const NEXT_BATCH_START_ID_KEY: &str = "__meta_next_batch_start_id";
@@ -362,6 +362,3 @@ pub fn delete_batch(
     db.write(batch)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

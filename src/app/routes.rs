@@ -1,8 +1,8 @@
 use axum::{Json, Router, http::StatusCode, routing::post};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::actors::IngestCmd;
-use crate::models::TelemetryEvent;
+use crate::app::actors::IngestCmd;
+use crate::domain::models::TelemetryEvent;
 
 // ── Shared application state ───────────────────────────────────────
 
@@ -27,12 +27,12 @@ async fn ingest_handler(
 ) -> StatusCode {
     let (ack_tx, ack_rx) = oneshot::channel();
 
-    if let Err(e) = state
+    if let Err(error) = state
         .ingest_tx
         .send(IngestCmd::WriteEvent { event, ack: ack_tx })
         .await
     {
-        eprintln!("[ingest] channel send failed: {e}");
+        eprintln!("[ingest] channel send failed: {error}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 

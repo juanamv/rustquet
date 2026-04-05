@@ -15,6 +15,3 @@ fn chrono_now() -> i64 {
         .expect("system clock before epoch")
         .as_secs() as i64
 }
-
-#[cfg(test)]
-mod tests;

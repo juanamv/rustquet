@@ -9,7 +9,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::models::TelemetryEvent;
+use crate::domain::models::TelemetryEvent;
 
 pub fn parquet_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
     PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
@@ -81,6 +81,3 @@ pub fn write_parquet(
 
     Ok((final_path.to_string_lossy().into_owned(), events.len()))
 }
-
-#[cfg(test)]
-mod tests;
