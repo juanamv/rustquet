@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{Int64Builder, StringBuilder};
@@ -10,12 +11,30 @@ use parquet::file::properties::WriterProperties;
 
 use crate::models::TelemetryEvent;
 
+pub fn parquet_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
+    PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
+}
+
+fn parquet_temp_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
+    PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet.tmp"))
+}
+
 pub fn write_parquet(
     events: &[TelemetryEvent],
-    batch_index: u64,
+    batch_start_id: u64,
     output_dir: &str,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all(output_dir)?;
+
+    let final_path = parquet_file_path(output_dir, batch_start_id);
+    if final_path.exists() {
+        return Ok((final_path.to_string_lossy().into_owned(), events.len()));
+    }
+
+    let temp_path = parquet_temp_file_path(output_dir, batch_start_id);
+    if temp_path.exists() {
+        std::fs::remove_file(&temp_path)?;
+    }
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),
@@ -46,25 +65,19 @@ pub fn write_parquet(
         ],
     )?;
 
-    let file_name = format!(
-        "{}/batch_{:010}_{}.parquet",
-        output_dir,
-        batch_index,
-        uuid::Uuid::now_v7()
-    );
-
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
 
-    let mut buf = Vec::new();
+    let mut buffer = Vec::new();
     {
-        let mut writer = ArrowWriter::try_new(Cursor::new(&mut buf), schema, Some(props))?;
+        let mut writer = ArrowWriter::try_new(Cursor::new(&mut buffer), schema, Some(props))?;
         writer.write(&batch)?;
         writer.close()?;
     }
 
-    std::fs::write(&file_name, &buf)?;
+    std::fs::write(&temp_path, &buffer)?;
+    std::fs::rename(&temp_path, &final_path)?;
 
-    Ok((file_name, events.len()))
+    Ok((final_path.to_string_lossy().into_owned(), events.len()))
 }
