@@ -41,18 +41,21 @@ pub fn write_parquet(
         Field::new("path", DataType::Utf8, false),
         Field::new("event_name", DataType::Utf8, false),
         Field::new("timestamp", DataType::Int64, false),
+        Field::new("metadata", DataType::Utf8, false),
     ]));
 
     let mut session_builder = StringBuilder::new();
     let mut path_builder = StringBuilder::new();
     let mut event_name_builder = StringBuilder::new();
     let mut timestamp_builder = Int64Builder::new();
+    let mut metadata_builder = StringBuilder::new();
 
     for event in events {
         session_builder.append_value(&event.session_id);
         path_builder.append_value(&event.path);
         event_name_builder.append_value(&event.event_name);
         timestamp_builder.append_value(event.timestamp);
+        metadata_builder.append_value(event.metadata.to_string());
     }
 
     let batch = RecordBatch::try_new(
@@ -62,6 +65,7 @@ pub fn write_parquet(
             Arc::new(path_builder.finish()),
             Arc::new(event_name_builder.finish()),
             Arc::new(timestamp_builder.finish()),
+            Arc::new(metadata_builder.finish()),
         ],
     )?;
 
