@@ -17,6 +17,9 @@ pub enum IngestCmd {
     },
     /// Sent by the ParquetActor after a batch is fully processed.
     BatchDone,
+    /// Graceful shutdown: flush remaining events to Parquet.
+    #[allow(dead_code)]
+    Shutdown,
 }
 
 pub enum ParquetCmd {
@@ -79,6 +82,20 @@ pub async fn run_ingest_actor(
             }
             IngestCmd::BatchDone => {
                 // Acknowledgement only — counter keeps running.
+            }
+            IngestCmd::Shutdown => {
+                // Flush remaining events that didn't fill a complete batch.
+                let remaining = counter - next_batch_start;
+                if remaining > 0
+                    && let Ok(events) =
+                        storage::read_batch(&db, next_batch_start, remaining as usize)
+                {
+                    let _ = parquet_tx.send(ParquetCmd::ProcessBatch {
+                        events,
+                        batch_start: next_batch_start,
+                    });
+                }
+                break;
             }
         }
     }
