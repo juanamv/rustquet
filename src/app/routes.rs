@@ -1,3 +1,4 @@
+use axum::extract::rejection::JsonRejection;
 use axum::{Json, Router, http::StatusCode, routing::post};
 use tokio::sync::{mpsc, oneshot};
 
@@ -23,8 +24,16 @@ pub fn router(state: AppState) -> Router {
 
 async fn ingest_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    Json(event): Json<TelemetryEvent>,
+    payload: Result<Json<TelemetryEvent>, JsonRejection>,
 ) -> StatusCode {
+    let Json(event) = match payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            eprintln!("[ingest] invalid json payload: {error}");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let (ack_tx, ack_rx) = oneshot::channel();
 
     if let Err(error) = state
