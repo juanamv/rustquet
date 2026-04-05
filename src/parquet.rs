@@ -81,3 +81,6 @@ pub fn write_parquet(
 
     Ok((final_path.to_string_lossy().into_owned(), events.len()))
 }
+
+#[cfg(test)]
+mod tests;

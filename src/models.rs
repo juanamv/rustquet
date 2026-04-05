@@ -9,9 +9,12 @@ pub struct TelemetryEvent {
     pub timestamp: i64,
 }
 
-pub fn chrono_now() -> i64 {
+fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before epoch")
         .as_secs() as i64
 }
+
+#[cfg(test)]
+mod tests;

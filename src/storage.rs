@@ -362,3 +362,6 @@ pub fn delete_batch(
     db.write(batch)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
