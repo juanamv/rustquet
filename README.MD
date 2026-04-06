@@ -139,7 +139,7 @@ Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` pr
 
 | Campo | Requisito | Descripcion |
 |-------|-----------|-------------|
-| `dataset.write_manifest` | obligatorio | indica si el dataset expone manifests por batch; hoy `true` |
+| `dataset.write_manifest` | obligatorio | indica si el dataset expone manifests por batch; `true` |
 | `schema.schema_version` | obligatorio | numero entero, debe crecer con cada version |
 | `schema.columns` | obligatorio | lista de columnas indexadas |
 | `schema.columns[].name` | obligatorio | nombre de la columna en Parquet |
