@@ -90,3 +90,21 @@ fn test_load_schema_from_path_rejects_invalid_column_type() {
     let error = load_schema_from_path(file.path()).unwrap_err();
     assert!(error.to_string().contains("unknown variant"));
 }
+
+#[test]
+fn test_load_schema_from_path_accepts_number_column_type() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(
+        file,
+        "{{\"schema_version\":1,\"columns\":[{{\"name\":\"price\",\"source\":\"metadata.price\",\"type\":\"number\"}}]}}"
+    )
+    .unwrap();
+
+    let schema = load_schema_from_path(file.path()).unwrap();
+
+    assert_eq!(schema.version, 1);
+    assert_eq!(
+        schema.columns,
+        vec![IndexedColumn::new("price", &["price"], ColumnType::Number)]
+    );
+}

@@ -14,6 +14,7 @@ pub enum ColumnType {
     #[serde(alias = "boolean")]
     Bool,
     String,
+    Number,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

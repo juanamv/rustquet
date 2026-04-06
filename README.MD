@@ -131,13 +131,19 @@ El archivo `config.json` define la version del schema y las columnas indexadas a
 | `columns` | obligatorio | lista de columnas indexadas |
 | `name` | obligatorio | nombre de la columna en Parquet |
 | `source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
-| `type` | obligatorio | `boolean` o `string` |
+| `type` | obligatorio | `boolean`, `string` o `number` |
 
 **Reglas de versionado:**
 
 - una nueva version solo puede agregar columnas; no puede modificar ni eliminar columnas existentes
 - si una version existente cambia su definicion, el servidor rechaza el arranque
 - no se permiten numeros de version menores a los ya persistidos
+
+**Tipos indexables admitidos:**
+
+- `boolean` -> columna Parquet `Boolean`
+- `string` -> columna Parquet `Utf8`
+- `number` -> columna Parquet `Float64`; acepta enteros y decimales JSON sin distinguirlos en el schema
 
 ## Columnas Parquet
 

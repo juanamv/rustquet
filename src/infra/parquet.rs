@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanBuilder, Int64Builder, StringBuilder};
+use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -16,6 +16,7 @@ use crate::domain::schema::{self, ColumnType, SchemaSpec};
 enum IndexedBuilder {
     Bool(BooleanBuilder),
     String(StringBuilder),
+    Number(Float64Builder),
 }
 
 impl IndexedBuilder {
@@ -23,6 +24,7 @@ impl IndexedBuilder {
         match kind {
             ColumnType::Bool => Self::Bool(BooleanBuilder::new()),
             ColumnType::String => Self::String(StringBuilder::new()),
+            ColumnType::Number => Self::Number(Float64Builder::new()),
         }
     }
 
@@ -30,6 +32,7 @@ impl IndexedBuilder {
         match self {
             Self::Bool(_) => Field::new(name, DataType::Boolean, true),
             Self::String(_) => Field::new(name, DataType::Utf8, true),
+            Self::Number(_) => Field::new(name, DataType::Float64, true),
         }
     }
 
@@ -39,6 +42,14 @@ impl IndexedBuilder {
             (Self::Bool(builder), _) => builder.append_null(),
             (Self::String(builder), Some(Value::String(value))) => builder.append_value(value),
             (Self::String(builder), _) => builder.append_null(),
+            (Self::Number(builder), Some(Value::Number(value))) => {
+                if let Some(value) = value.as_f64() {
+                    builder.append_value(value);
+                } else {
+                    builder.append_null();
+                }
+            }
+            (Self::Number(builder), _) => builder.append_null(),
         }
     }
 
@@ -46,6 +57,7 @@ impl IndexedBuilder {
         match self {
             Self::Bool(mut builder) => Arc::new(builder.finish()),
             Self::String(mut builder) => Arc::new(builder.finish()),
+            Self::Number(mut builder) => Arc::new(builder.finish()),
         }
     }
 }
