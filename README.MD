@@ -2,31 +2,41 @@
 
 Microservicio de ingesta de telemetria en Rust.
 
-Recibe eventos por HTTP, los persiste primero en RocksDB y luego los convierte a archivos Parquet en batches estrictos por cantidad.
+Recibe eventos por HTTP, los persiste en RocksDB de forma inmediata y los convierte a archivos Parquet en batches estrictos por cantidad.
 
-## Que hace
+## Indice
 
-- expone `POST /ingest`
-- guarda cada evento en RocksDB antes de responder
-- genera Parquet en `parquet_output/`
-- recupera batches pendientes tras reinicios
-- carga un esquema de columnas indexadas desde `config.json`
-- evita sobreescrituras de schema entre versiones
+1. [Resumen](#resumen)
+2. [Ejecucion](#ejecucion)
+3. [API HTTP](#api-http)
+4. [Schema de configuracion](#schema-de-configuracion)
+5. [Columnas Parquet](#columnas-parquet)
+6. [Versionado de schema](#versionado-de-schema)
+7. [Recuperacion ante reinicios](#recuperacion-ante-reinicios)
+8. [Archivos generados](#archivos-generados)
+9. [Comandos](#comandos)
+10. [Limpieza de datos](#limpieza-de-datos)
 
-## Requisitos
+## Resumen
 
-- Rust 1.93.1 o superior
-- RocksDB se compila automaticamente con Cargo
+- `POST /ingest` — recibe eventos JSON
+- persistencia inmediata en RocksDB antes de responder
+- conversion a Parquet en `parquet_output/` cuando un batch alcanza su tamanho exacto
+- recuperacion automatica de batches pendientes tras reinicios
+- columnas indexadas configurables via `config.json`
+- versionado de schema con reglas append-only
 
-## Ejecutar
+## Ejecucion
 
-Schema por defecto:
+Requiere Rust 1.93.1 o superior.
+
+Schema por defecto (`config.json`):
 
 ```bash
 cargo run --release
 ```
 
-Schema explicito por argumento:
+Schema explicito via argumento:
 
 ```bash
 cargo run --release -- config_v2.json
@@ -34,11 +44,13 @@ cargo run --release -- config_v2.json
 
 El servidor escucha en `127.0.0.1:3000`.
 
-## Payload HTTP
+## API HTTP
 
-El payload de ingreso no cambia aunque agregues columnas indexadas al schema.
+### POST /ingest
 
-Ejemplo:
+Recibe un evento JSON.
+
+**Request:**
 
 ```json
 {
@@ -53,7 +65,17 @@ Ejemplo:
 }
 ```
 
-Ejemplo con `curl`:
+| Campo | Tipo | Descripcion |
+|-------|------|-------------|
+| `id` | `string` | identificador unico del evento |
+| `path` | `string` | ruta asociada al evento |
+| `event_name` | `string` | nombre del evento |
+| `metadata` | `object` | datos adicionales, campos arbitarios |
+| `timestamp` | `string` | generado por el servidor si se omite (RFC 3339) |
+
+**Respuesta:** `201 Created`
+
+**Ejemplo con curl:**
 
 ```bash
 curl -X POST http://127.0.0.1:3000/ingest \
@@ -70,11 +92,20 @@ curl -X POST http://127.0.0.1:3000/ingest \
   }'
 ```
 
-Respuesta esperada: `201 Created`.
+## Schema de configuracion
 
-## Schema JSON
+El archivo `config.json` define la version del schema y las columnas indexadas a extraer de `metadata`.
 
-El schema se define en archivos `.json` como este:
+**Formatos disponibles en el repositorio:**
+
+| Archivo | Version | Descripcion |
+|---------|---------|-------------|
+| `config.json` | 1 | columnas `h2o` (bool) y `slot` (string) |
+| `config_v2.json` | 2 | agrega `region` (string) |
+| `config_v2_overwrite.json` | 2 | invalido: sobrescribe tipo de `h2o` |
+| `config_v3_nested.json` | 3 | agrega `country` via path anidado |
+
+**Estructura del schema:**
 
 ```json
 {
@@ -94,91 +125,110 @@ El schema se define en archivos `.json` como este:
 }
 ```
 
-Reglas:
+| Campo | Requisito | Descripcion |
+|-------|-----------|-------------|
+| `schema_version` | obligatorio | numero entero, debe crecer con cada version |
+| `columns` | obligatorio | lista de columnas indexadas |
+| `name` | obligatorio | nombre de la columna en Parquet |
+| `source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
+| `type` | obligatorio | `boolean` o `string` |
 
-- `schema_version` debe subir cuando agregas una nueva version
-- `source` debe empezar con `metadata.`
-- el mismo nombre de columna no puede cambiar de tipo ni de origen
-- los cambios permitidos son `append-only`
-- si una version existente cambia su definicion, el arranque falla
+**Reglas de versionado:**
 
-Ejemplos incluidos en el repo:
-
-- `config.json`: version 1
-- `config_v2.json`: version 2, agrega `region`
-- `config_v2_overwrite.json`: version 2 invalida, intenta sobrescribir `h2o`
-- `config_v3_nested.json`: version 3 con path anidado `metadata.geo.country`
+- una nueva version solo puede agregar columnas; no puede modificar ni eliminar columnas existentes
+- si una version existente cambia su definicion, el servidor rechaza el arranque
+- no se permiten numeros de version menores a los ya persistidos
 
 ## Columnas Parquet
 
-Cada archivo Parquet siempre incluye estas columnas fijas:
+Cada archivo Parquet contiene estas columnas fijas:
 
-- `id`
-- `path`
-- `event_name`
-- `timestamp`
-- `metadata`
+| Columna | Tipo | Descripcion |
+|---------|------|-------------|
+| `id` | `string` | identificador del evento |
+| `path` | `string` | ruta del evento |
+| `event_name` | `string` | nombre del evento |
+| `timestamp` | `string` | instante del evento (RFC 3339) |
+| `metadata` | `string` | JSON crudo del campo `metadata` original |
 
-Ademas incluye las columnas indexadas definidas en el schema activo.
+Mas las columnas indexadas definidas en el schema activo.
 
-Con `config.json` se generan tambien:
+**Manejo de errores:**
 
-- `h2o`
-- `slot`
+- si un campo de `metadata` no existe → la columna tipada es `NULL`
+- si el tipo en `metadata` no coincide con el declarado → la columna tipada es `NULL`
+- `metadata` se conserva siempre como JSON crudo sin perdida
 
-Con `config_v2.json` se agrega:
+## Versionado de schema
 
-- `region`
+El sistema mantiene consistencia entre batches durante actualizaciones de schema.
 
-Si un campo configurado no existe en `metadata` o tiene el tipo incorrecto, la columna tipada se escribe como `NULL` y `metadata` raw se conserva completo.
+- cada batch en curso persiste su `schema_version` en RocksDB
+- al reiniciar, los batches pendientes se completan con el schema bajo el cual iniciaron
+- los batches nuevos usan el schema cargado actualmente
+- si no hay batch activo y llega un evento, se asigna la version actual del schema
 
-## Versionado y reinicios
+**Validacion al arranque:**
 
-- los batches nuevos usan una sola `schema_version` activa
-- cada `active_batch` persiste su `schema_version` en RocksDB
-- si reinicias con una version nueva, un batch viejo pendiente se termina con su schema viejo
-- las versiones nuevas se validan contra RocksDB antes de arrancar
+- la version del archivo `config.json` se contrasta contra lo almacenado en RocksDB
+- una redefinicion de columnas en la misma version genera un error de arranque
+- una version menor a una ya existente genera un error de arranque
+
+## Recuperacion ante reinicios
+
+El servidor recupera el estado de RocksDB automaticamente:
+
+1. lee `next_event_id` y `next_batch_start_id`
+2. si existe un `active_batch`, verifica si el archivo `.parquet` final ya existe
+3. si el archivo `.parquet` existe → limpia el batch de RocksDB sin regenerar
+4. si el archivo `.parquet` falta → regenera el batch desde RocksDB
+5. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
+
+No se requiere intervencion manual.
 
 ## Archivos generados
 
-Los archivos Parquet se guardan en `parquet_output/` con el formato:
+Ubicacion: `parquet_output/`
 
-```text
+Nombrado deterministico:
+
+```
 batch_0000000001.parquet
 ```
 
-La escritura usa archivo temporal `.tmp` y luego `rename` atomico.
+El servidor escribe a un archivo `.tmp` y luego hace `rename` atomico para garantizar consistencia.
 
-## Comandos utiles
-
-Compilar:
+## Comandos
 
 ```bash
+# compilar en modo debug
+cargo build
+
+# compilar en modo release
 cargo build --release
-```
 
-Formatear:
-
-```bash
+# formatear codigo
 cargo fmt
-```
 
-Lint estricto:
-
-```bash
+# lint estricto
 cargo clippy -- -D warnings
-```
 
-Tests:
-
-```bash
+# ejecutar tests
 cargo test
+
+# ejecutar tests de integracion
+cargo test --test '*'
+
+# verificar documentacion
+cargo doc
 ```
 
-## Limpiar datos locales
-
-PowerShell:
+## Limpieza de datos
 
 ```powershell
 Remove-Item -Recurse -Force rustquet_data, parquet_output
+```
+
+```bash
+rm -rf rustquet_data parquet_output
 ```
