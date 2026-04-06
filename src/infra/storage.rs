@@ -72,15 +72,22 @@ fn invalid_data(message: &str) -> Error {
 
 fn format_column(column: &IndexedColumn) -> String {
     format!(
-        "{} <- metadata.{} ({})",
+        "{} <- metadata.{} ({}, materialize={})",
         column.name,
         column.path.join("."),
         match column.kind {
             schema::ColumnType::Bool => "boolean",
             schema::ColumnType::String => "string",
             schema::ColumnType::Number => "number",
-        }
+        },
+        column.materialize
     )
+}
+
+fn same_column_projection(existing: &IndexedColumn, requested: &IndexedColumn) -> bool {
+    existing.name == requested.name
+        && existing.path == requested.path
+        && existing.kind == requested.kind
 }
 
 fn format_schema_columns(schema_spec: &SchemaSpec) -> String {
@@ -319,13 +326,13 @@ fn validate_schema_shape(
 fn historical_columns(
     schemas: &BTreeMap<u32, SchemaSpec>,
 ) -> Result<HashMap<&str, &IndexedColumn>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut columns = HashMap::new();
+    let mut columns: HashMap<&str, &IndexedColumn> = HashMap::new();
 
     for schema in schemas.values() {
         validate_schema_shape(schema)?;
         for column in &schema.columns {
             match columns.get(column.name.as_str()) {
-                Some(existing) if *existing != column => {
+                Some(existing) if !same_column_projection(existing, column) => {
                     return Err(
                         invalid_data("stored schema history redefines an indexed column").into(),
                     );
@@ -354,7 +361,7 @@ fn validate_append_only_schema(
 
     for current_column in &current_schema.columns {
         match new_columns.get(current_column.name.as_str()) {
-            Some(column) if *column == current_column => {}
+            Some(column) if same_column_projection(column, current_column) => {}
             Some(column) => {
                 return Err(invalid_data(&append_only_schema_message(
                     current_schema,
@@ -384,7 +391,7 @@ fn validate_append_only_schema(
 
     for column in &new_schema.columns {
         if let Some(existing) = historical.get(column.name.as_str())
-            && *existing != column
+            && !same_column_projection(existing, column)
         {
             return Err(invalid_data(&historical_redefinition_message(
                 existing, new_schema, column,

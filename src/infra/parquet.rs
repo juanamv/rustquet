@@ -80,6 +80,14 @@ impl IndexedBuilder {
         }
     }
 
+    fn append_null(&mut self) {
+        match self {
+            Self::Bool(builder) => builder.append_null(),
+            Self::String(builder) => builder.append_null(),
+            Self::Number(builder) => builder.append_null(),
+        }
+    }
+
     fn finish(self) -> ArrayRef {
         match self {
             Self::Bool(mut builder) => Arc::new(builder.finish()),
@@ -279,7 +287,11 @@ fn write_single_parquet_file(
         timestamp_builder.append_value(event.timestamp);
         metadata_builder.append_value(event.metadata.to_string());
         for (column, builder) in schema_spec.columns.iter().zip(indexed_builders.iter_mut()) {
-            builder.append(metadata_value(&event.metadata, &column.path));
+            if column.materialize {
+                builder.append(metadata_value(&event.metadata, &column.path));
+            } else {
+                builder.append_null();
+            }
         }
     }
 

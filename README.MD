@@ -234,6 +234,12 @@ Notas:
         "name": "slot",
         "source": "metadata.slot",
         "type": "string"
+      },
+      {
+        "name": "h2o",
+        "source": "metadata.h2o",
+        "type": "boolean",
+        "materialize": false
       }
     ]
   }
@@ -262,6 +268,7 @@ Notas:
 | `schema.columns[].name` | obligatorio | nombre de la columna en Parquet |
 | `schema.columns[].source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
 | `schema.columns[].type` | obligatorio | `boolean`, `string` o `number` |
+| `schema.columns[].materialize` | opcional | `true` o `false`; por defecto `true` |
 
 **Validacion de `push`:**
 
@@ -283,6 +290,14 @@ Notas:
 - `boolean` -> columna Parquet `Boolean`
 - `string` -> columna Parquet `Utf8`
 - `number` -> columna Parquet `Float64`; acepta enteros y decimales JSON sin distinguirlos en el schema
+
+**Desmaterializar una columna sin quitarla del schema:**
+
+- si `materialize=false`, `rustquet` mantiene la columna en Parquet pero escribe `NULL` para filas nuevas
+- el valor original sigue preservado dentro de `metadata`
+- esto sirve para retirar una columna indexada sin romper el layout historico del dataset
+- para una misma `schema_version`, cambiar `materialize` sigue contando como cambio de definicion
+- en una version nueva de schema, puedes mantener la columna y marcarla con `materialize=false`
 
 **Particionado del dataset:**
 

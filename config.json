@@ -24,6 +24,12 @@
         "name": "slot",
         "source": "metadata.slot",
         "type": "string"
+      },
+      {
+        "name": "h2o",
+        "source": "metadata.h2o",
+        "type": "boolean",
+        "materialized": false
       }
     ]
   }

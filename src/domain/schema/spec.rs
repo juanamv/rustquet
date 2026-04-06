@@ -23,6 +23,8 @@ pub struct IndexedColumn {
     pub name: String,
     pub path: Vec<String>,
     pub kind: ColumnType,
+    #[serde(default = "default_materialize")]
+    pub materialize: bool,
 }
 
 impl IndexedColumn {
@@ -31,8 +33,18 @@ impl IndexedColumn {
             name: name.into(),
             path: path.iter().map(|segment| (*segment).into()).collect(),
             kind,
+            materialize: default_materialize(),
         }
     }
+
+    pub fn with_materialize(mut self, materialize: bool) -> Self {
+        self.materialize = materialize;
+        self
+    }
+}
+
+fn default_materialize() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +153,8 @@ struct SchemaFileColumn {
     source: String,
     #[serde(rename = "type")]
     kind: ColumnType,
+    #[serde(default = "default_materialize")]
+    materialize: bool,
 }
 
 fn invalid_data(message: &str) -> Error {
@@ -340,6 +354,7 @@ pub fn load_config_from_path(
                         name: column.name,
                         path: parse_source_path(&column.source)?,
                         kind: column.kind,
+                        materialize: column.materialize,
                     })
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?,
