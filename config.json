@@ -6,14 +6,14 @@
     {
       "name": "lake_primary",
       "kind": "s3_compatible",
+      "bucket": "telemetry-bucket",
+      "prefix": "rustquet/prod",
+      "endpoint": "http://127.0.0.1:9000",
+      "region": "us-east-1",
+      "allow_http": true,
       "env": {
-        "bucket": "PUSH_BUCKET",
-        "prefix": "PUSH_PREFIX",
-        "endpoint": "PUSH_ENDPOINT",
-        "region": "PUSH_REGION",
         "access_key_id": "PUSH_ACCESS_KEY_ID",
-        "secret_access_key": "PUSH_SECRET_ACCESS_KEY",
-        "allow_http": "PUSH_ALLOW_HTTP"
+        "secret_access_key": "PUSH_SECRET_ACCESS_KEY"
       }
     }
   ],

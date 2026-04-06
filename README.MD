@@ -69,17 +69,12 @@ SCHEMA_CONFIG_PATH=config.json
 # opcional: si falta, rustquet arranca sin auth bearer
 INGEST_BEARER_TOKEN=replace-with-a-long-random-secret
 
-# valores resueltos por un destino push definido en config.json
-LAKE_BUCKET=telemetry-bucket
-LAKE_PREFIX=rustquet/prod
-LAKE_ENDPOINT=http://127.0.0.1:9000
-LAKE_REGION=us-east-1
-LAKE_ACCESS_KEY_ID=...
-LAKE_SECRET_ACCESS_KEY=...
-LAKE_ALLOW_HTTP=true
+# credenciales resueltas por un destino push definido en config.json
+PUSH_ACCESS_KEY_ID=...
+PUSH_SECRET_ACCESS_KEY=...
 ```
 
-`rustquet` usa `object_store` para el upload remoto. Los valores concretos de bucket, endpoint, region y credenciales se leen desde variables de entorno cuyos nombres se declaran en `config.json`.
+`rustquet` usa `object_store` para el upload remoto. `bucket`, `prefix`, `endpoint`, `region` y `allow_http` viven en `config.json`. Solo las credenciales se resuelven desde variables de entorno cuyos nombres se declaran en `push[].env`.
 
 Precedencia para el schema:
 
@@ -216,14 +211,14 @@ Notas:
     {
       "name": "lake_primary",
       "kind": "s3_compatible",
+      "bucket": "telemetry-bucket",
+      "prefix": "rustquet/prod",
+      "endpoint": "http://127.0.0.1:9000",
+      "region": "us-east-1",
+      "allow_http": true,
       "env": {
-        "bucket": "LAKE_BUCKET",
-        "prefix": "LAKE_PREFIX",
-        "endpoint": "LAKE_ENDPOINT",
-        "region": "LAKE_REGION",
-        "access_key_id": "LAKE_ACCESS_KEY_ID",
-        "secret_access_key": "LAKE_SECRET_ACCESS_KEY",
-        "allow_http": "LAKE_ALLOW_HTTP"
+        "access_key_id": "PUSH_ACCESS_KEY_ID",
+        "secret_access_key": "PUSH_SECRET_ACCESS_KEY"
       }
     }
   ],
@@ -252,15 +247,15 @@ Notas:
 | `push[].name` | obligatorio | identificador unico y estable del destino |
 | `push[].kind` | obligatorio | hoy: `s3_compatible` |
 | `push[].artifacts` | opcional | `parquet`, `manifest` o ambos; si se omite, usa `parquet` y agrega `manifest` si `dataset.write_manifest=true` |
-| `push[].env.*` | obligatorio/segun campo | nombres de variables de entorno; no guarda secretos ni valores reales |
-| `push[].env.bucket` | obligatorio | variable que contiene el bucket |
-| `push[].env.prefix` | opcional | variable que contiene el prefijo remoto |
-| `push[].env.endpoint` | obligatorio | variable que contiene el endpoint S3-compatible |
-| `push[].env.region` | obligatorio | variable que contiene la region |
+| `push[].bucket` | obligatorio | bucket remoto |
+| `push[].prefix` | opcional | prefijo remoto |
+| `push[].endpoint` | obligatorio | endpoint S3-compatible |
+| `push[].region` | obligatorio | region remota |
+| `push[].allow_http` | opcional | `true` o `false`; por defecto `false` |
+| `push[].env.*` | obligatorio/segun campo | nombres de variables de entorno para credenciales |
 | `push[].env.access_key_id` | obligatorio | variable que contiene el access key id |
 | `push[].env.secret_access_key` | obligatorio | variable que contiene el secret access key |
 | `push[].env.session_token` | opcional | variable que contiene un session token |
-| `push[].env.allow_http` | opcional | variable booleana `true` o `false` |
 | `push[].env.virtual_hosted_style` | opcional | variable booleana `true` o `false` |
 | `schema.schema_version` | obligatorio | numero entero, debe crecer con cada version |
 | `schema.columns` | obligatorio | lista de columnas indexadas |
@@ -273,6 +268,7 @@ Notas:
 - `push[].name` debe ser unico
 - `push[].artifacts` no puede repetir valores
 - si `dataset.write_manifest=false`, no se permite subir `manifest`
+- `push[].bucket`, `push[].endpoint` y `push[].region` no pueden ser vacios
 - cada `push[].env.*` debe apuntar a un nombre de variable no vacio
 - dentro de un mismo destino no se puede reutilizar la misma variable para campos distintos
 

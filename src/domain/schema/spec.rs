@@ -74,17 +74,10 @@ pub enum PushKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushEnvSpec {
-    pub bucket: String,
-    #[serde(default)]
-    pub prefix: Option<String>,
-    pub endpoint: String,
-    pub region: String,
     pub access_key_id: String,
     pub secret_access_key: String,
     #[serde(default)]
     pub session_token: Option<String>,
-    #[serde(default)]
-    pub allow_http: Option<String>,
     #[serde(default)]
     pub virtual_hosted_style: Option<String>,
 }
@@ -95,6 +88,13 @@ pub struct PushSpec {
     pub kind: PushKind,
     #[serde(default)]
     pub artifacts: Option<Vec<PushArtifact>>,
+    pub bucket: String,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    pub endpoint: String,
+    pub region: String,
+    #[serde(default)]
+    pub allow_http: Option<bool>,
     pub env: PushEnvSpec,
 }
 
@@ -224,17 +224,12 @@ fn validate_push_spec(
         None
     };
 
+    let bucket = validate_non_empty_field(&push.bucket, &format!("push '{name}' bucket"))?;
+    let prefix = validate_optional_non_empty_field(push.prefix, &format!("push '{name}' prefix"))?;
+    let endpoint = validate_non_empty_field(&push.endpoint, &format!("push '{name}' endpoint"))?;
+    let region = validate_non_empty_field(&push.region, &format!("push '{name}' region"))?;
+
     let mut seen_env_names = BTreeSet::new();
-    let bucket = validate_non_empty_field(&push.env.bucket, &format!("push '{name}' env.bucket"))?;
-    register_push_env_name(&mut seen_env_names, &name, "env.bucket", &bucket)?;
-
-    let endpoint =
-        validate_non_empty_field(&push.env.endpoint, &format!("push '{name}' env.endpoint"))?;
-    register_push_env_name(&mut seen_env_names, &name, "env.endpoint", &endpoint)?;
-
-    let region = validate_non_empty_field(&push.env.region, &format!("push '{name}' env.region"))?;
-    register_push_env_name(&mut seen_env_names, &name, "env.region", &region)?;
-
     let access_key_id = validate_non_empty_field(
         &push.env.access_key_id,
         &format!("push '{name}' env.access_key_id"),
@@ -257,12 +252,6 @@ fn validate_push_spec(
         &secret_access_key,
     )?;
 
-    let prefix =
-        validate_optional_non_empty_field(push.env.prefix, &format!("push '{name}' env.prefix"))?;
-    if let Some(prefix) = &prefix {
-        register_push_env_name(&mut seen_env_names, &name, "env.prefix", prefix)?;
-    }
-
     let session_token = validate_optional_non_empty_field(
         push.env.session_token,
         &format!("push '{name}' env.session_token"),
@@ -274,14 +263,6 @@ fn validate_push_spec(
             "env.session_token",
             session_token,
         )?;
-    }
-
-    let allow_http = validate_optional_non_empty_field(
-        push.env.allow_http,
-        &format!("push '{name}' env.allow_http"),
-    )?;
-    if let Some(allow_http) = &allow_http {
-        register_push_env_name(&mut seen_env_names, &name, "env.allow_http", allow_http)?;
     }
 
     let virtual_hosted_style = validate_optional_non_empty_field(
@@ -301,15 +282,15 @@ fn validate_push_spec(
         name,
         kind: push.kind,
         artifacts,
+        bucket,
+        prefix,
+        endpoint,
+        region,
+        allow_http: push.allow_http,
         env: PushEnvSpec {
-            bucket,
-            prefix,
-            endpoint,
-            region,
             access_key_id,
             secret_access_key,
             session_token,
-            allow_http,
             virtual_hosted_style,
         },
     })

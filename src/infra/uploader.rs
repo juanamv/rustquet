@@ -100,12 +100,9 @@ impl PushTarget {
         write_manifest: bool,
         env_getter: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let bucket =
-            resolve_required_env_value(env_getter, &spec.name, "bucket", &spec.env.bucket)?;
-        let endpoint =
-            resolve_required_env_value(env_getter, &spec.name, "endpoint", &spec.env.endpoint)?;
-        let region =
-            resolve_required_env_value(env_getter, &spec.name, "region", &spec.env.region)?;
+        let bucket = spec.bucket.trim().to_string();
+        let endpoint = spec.endpoint.trim().to_string();
+        let region = spec.region.trim().to_string();
         let access_key_id = resolve_required_env_value(
             env_getter,
             &spec.name,
@@ -118,37 +115,18 @@ impl PushTarget {
             "secret_access_key",
             &spec.env.secret_access_key,
         )?;
-        let prefix = resolve_optional_env_value(
-            env_getter,
-            &spec.name,
-            "prefix",
-            spec.env.prefix.as_deref(),
-        )?
-        .map(|value| normalize_object_prefix(&value))
-        .unwrap_or_default();
+        let prefix = spec
+            .prefix
+            .as_deref()
+            .map(normalize_object_prefix)
+            .unwrap_or_default();
         let session_token = resolve_optional_env_value(
             env_getter,
             &spec.name,
             "session_token",
             spec.env.session_token.as_deref(),
         )?;
-        let allow_http = resolve_optional_env_value(
-            env_getter,
-            &spec.name,
-            "allow_http",
-            spec.env.allow_http.as_deref(),
-        )?
-        .as_deref()
-        .map(|value| {
-            parse_bool_env_value(
-                &spec.name,
-                "allow_http",
-                spec.env.allow_http.as_deref().unwrap_or_default(),
-                value,
-            )
-        })
-        .transpose()?
-        .unwrap_or(false);
+        let allow_http = spec.allow_http.unwrap_or(false);
         let virtual_hosted_style = resolve_optional_env_value(
             env_getter,
             &spec.name,

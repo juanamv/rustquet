@@ -7,3 +7,4 @@ tests.rs
 manifests
 target_schema_versioning
 target_dotenv_tests
+target_dotenv_push_json
