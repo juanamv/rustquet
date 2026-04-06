@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryEvent {
+    #[serde(default = "default_id")]
     pub id: String,
     pub path: String,
     pub event_name: String,
@@ -13,6 +15,10 @@ pub struct TelemetryEvent {
 
 fn default_metadata() -> serde_json::Value {
     serde_json::json!({})
+}
+
+fn default_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 fn chrono_now() -> i64 {

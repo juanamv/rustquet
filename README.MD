@@ -97,6 +97,18 @@ El servidor escucha en `127.0.0.1:3000`.
 
 Recibe un evento JSON.
 
+Campos que debe enviar el cliente:
+
+- obligatorios: `path`, `event_name`
+- opcionales: `id`, `metadata`, `timestamp`
+
+Campos generados o completados automaticamente por `rustquet`:
+
+- `id`: si no se envia, se genera automaticamente como `uuid-v4`
+- `metadata`: si no se envia, se guarda como `{}`
+- `timestamp`: si no se envia, se genera automaticamente como Unix timestamp en segundos
+- `event_id` interno de RocksDB: se genera internamente para almacenamiento y batching; no reemplaza al `id` del payload
+
 **Request:**
 
 ```json
@@ -114,11 +126,11 @@ Recibe un evento JSON.
 
 | Campo | Tipo | Descripcion |
 |-------|------|-------------|
-| `id` | `string` | identificador unico del evento |
+| `id` | `string` | opcional; identificador unico del evento; si falta se genera como `uuid-v4` |
 | `path` | `string` | ruta asociada al evento |
 | `event_name` | `string` | nombre del evento |
-| `metadata` | `object` | datos adicionales, campos arbitarios |
-| `timestamp` | `string` | generado por el servidor si se omite (RFC 3339) |
+| `metadata` | `object` | opcional; datos adicionales, campos arbitrarios; por defecto `{}` |
+| `timestamp` | `integer` | opcional; Unix timestamp en segundos; se genera si se omite |
 
 **Respuesta:** `201 Created`
 
@@ -133,7 +145,6 @@ curl -X POST http://127.0.0.1:3000/ingest \
   -H "Authorization: Bearer $INGEST_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "abc123",
     "path": "/pagina/productos",
     "event_name": "click_boton",
     "metadata": {
@@ -153,6 +164,37 @@ El archivo `config.json` define tres secciones:
 - `push`: lista ordenada de destinos remotos opcionales
 
 Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` produce. El particionado no se configura desde el archivo: el sistema lo decide internamente para mantener un layout consistente y robusto.
+
+## Columnas del dataset
+
+Columnas fijas que siempre crea `rustquet` en Parquet:
+
+- `id`
+- `path`
+- `event_name`
+- `timestamp`
+- `metadata`
+
+Con el `config.json` actual de este repo, ademas se crean estas columnas indexadas extraidas desde `metadata`:
+
+- `h2o` desde `metadata.h2o`
+- `slot` desde `metadata.slot`
+
+Entonces, con el schema por defecto, las columnas Parquet quedan asi:
+
+- `id`
+- `path`
+- `event_name`
+- `timestamp`
+- `metadata`
+- `h2o`
+- `slot`
+
+Notas:
+
+- `year`, `month` y `day` no son columnas dentro del Parquet; forman parte del layout de particiones de los directorios de salida
+- `metadata` se conserva como JSON serializado en la columna `metadata`
+- las columnas indexadas configuradas en `schema.columns` se agregan como columnas nuevas en cada archivo Parquet
 
 **Formatos disponibles en el repositorio:**
 
@@ -259,10 +301,10 @@ Cada archivo Parquet contiene estas columnas fijas:
 
 | Columna | Tipo | Descripcion |
 |---------|------|-------------|
-| `id` | `string` | identificador del evento |
+| `id` | `string` | identificador del evento; si no vino en el payload, se genera como `uuid-v4` |
 | `path` | `string` | ruta del evento |
 | `event_name` | `string` | nombre del evento |
-| `timestamp` | `string` | instante del evento (RFC 3339) |
+| `timestamp` | `int64` | Unix timestamp en segundos |
 | `metadata` | `string` | JSON crudo del campo `metadata` original |
 
 Mas las columnas indexadas definidas en el schema activo.
