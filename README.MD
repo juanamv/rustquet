@@ -32,6 +32,16 @@ Recibe eventos por HTTP, los persiste en RocksDB de forma inmediata y los convie
 
 Requiere Rust 1.93.1 o superior.
 
+Configuracion runtime por defecto:
+
+- `SERVER_ADDR=127.0.0.1:3000`
+- `DB_PATH=rustquet_data`
+- `PARQUET_OUTPUT_DIR=parquet_output`
+- `BATCH_SIZE=10000`
+- `INGEST_CHANNEL_CAPACITY=8192`
+- `PARQUET_CHANNEL_CAPACITY=1`
+- `SCHEMA_CONFIG_PATH=config.json`
+
 Schema por defecto (`config.json`):
 
 ```bash
@@ -43,6 +53,24 @@ Schema explicito via argumento:
 ```bash
 cargo run --release -- config_v2.json
 ```
+
+Tambien puedes configurar runtime con `.env`:
+
+```env
+SERVER_ADDR=127.0.0.1:3000
+DB_PATH=rustquet_data
+PARQUET_OUTPUT_DIR=parquet_output
+BATCH_SIZE=10000
+INGEST_CHANNEL_CAPACITY=8192
+PARQUET_CHANNEL_CAPACITY=1
+SCHEMA_CONFIG_PATH=config.json
+```
+
+Precedencia para el schema:
+
+- argumento CLI
+- `SCHEMA_CONFIG_PATH` en entorno o `.env`
+- `config.json`
 
 El servidor escucha en `127.0.0.1:3000`.
 
