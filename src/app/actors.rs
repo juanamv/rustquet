@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 
 use rocksdb::DB;
@@ -187,6 +189,47 @@ fn finalize_batch(db: &DB, ingest_tx: &mpsc::Sender<IngestCmd>, batch: ActiveBat
     });
 }
 
+fn all_push_targets_uploaded(
+    push_targets: &[PushTarget],
+    uploaded_pushes: &BTreeSet<String>,
+) -> bool {
+    push_targets
+        .iter()
+        .all(|push_target| uploaded_pushes.contains(push_target.name()))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn cleanup_local_batch_artifacts(
+    output_dir: &str,
+    batch: ActiveBatch,
+    parquet_files: Option<&[crate::infra::parquet::ParquetDataFile]>,
+    manifest_path: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let parquet_paths = match parquet_files {
+        Some(files) => files
+            .iter()
+            .map(|file| Path::new(&file.path).to_path_buf())
+            .collect::<Vec<_>>(),
+        None => crate::infra::parquet::parquet_file_paths(output_dir, batch.start_event_id),
+    };
+
+    for parquet_path in parquet_paths {
+        remove_file_if_exists(&parquet_path)?;
+    }
+    if let Some(manifest_path) = manifest_path {
+        remove_file_if_exists(manifest_path)?;
+    }
+
+    Ok(())
+}
+
 fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) {
     let ParquetBatchContext {
         ingest_tx,
@@ -224,11 +267,50 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
             }
         });
 
-    if batch.status == ActiveBatchStatus::Written
-        && existing_manifest.as_ref().is_some_and(|manifest| {
-            crate::infra::manifest::manifest_files_exist(output_dir, manifest)
-        })
-    {
+    let uploaded_pushes = match storage::load_active_batch_uploaded_pushes(db) {
+        Ok(uploaded_pushes) => uploaded_pushes,
+        Err(error) => {
+            error!(error = %error, batch_id = batch.start_event_id, "failed to load uploaded push state");
+            return;
+        }
+    };
+
+    if batch.status == ActiveBatchStatus::Written {
+        if push_targets.is_empty() {
+            if existing_manifest.as_ref().is_some_and(|manifest| {
+                crate::infra::manifest::manifest_files_exist(output_dir, manifest)
+            }) {
+                finalize_batch(db, ingest_tx, batch);
+                return;
+            }
+        } else {
+            if let Err(error) = cleanup_local_batch_artifacts(
+                output_dir,
+                batch,
+                None,
+                manifest_lookup_path.as_deref(),
+            ) {
+                error!(error = %error, batch_id = batch.start_event_id, "failed to clean local batch artifacts");
+                return;
+            }
+
+            finalize_batch(db, ingest_tx, batch);
+            return;
+        }
+    }
+
+    if !push_targets.is_empty() && all_push_targets_uploaded(push_targets, &uploaded_pushes) {
+        if let Err(error) =
+            cleanup_local_batch_artifacts(output_dir, batch, None, manifest_lookup_path.as_deref())
+        {
+            error!(error = %error, batch_id = batch.start_event_id, "failed to clean local batch artifacts");
+            return;
+        }
+        if let Err(error) = storage::mark_active_batch_written(db, batch) {
+            error!(error = %error, batch_id = batch.start_event_id, "failed to mark batch as written");
+            return;
+        }
+
         finalize_batch(db, ingest_tx, batch);
         return;
     }
@@ -291,7 +373,13 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
     };
 
     if batch.status != ActiveBatchStatus::Written {
+        let mut uploaded_pushes = uploaded_pushes;
+
         for push_target in push_targets {
+            if uploaded_pushes.contains(push_target.name()) {
+                continue;
+            }
+
             match push_target.upload_batch_artifacts(
                 runtime_handle,
                 output_dir,
@@ -315,6 +403,18 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
                             "uploaded manifest artifact"
                         );
                     }
+                    if let Err(error) =
+                        storage::mark_active_batch_push_uploaded(db, batch, push_target.name())
+                    {
+                        error!(
+                            error = %error,
+                            push_name = push_target.name(),
+                            batch_id = batch.start_event_id,
+                            "failed to persist uploaded push state"
+                        );
+                        return;
+                    }
+                    uploaded_pushes.insert(push_target.name().to_string());
                 }
                 Err(error) => {
                     error!(
@@ -326,6 +426,18 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
                     return;
                 }
             }
+        }
+
+        if !push_targets.is_empty()
+            && let Err(error) = cleanup_local_batch_artifacts(
+                output_dir,
+                batch,
+                Some(&write_result.files),
+                manifest_path.as_deref().map(Path::new),
+            )
+        {
+            error!(error = %error, batch_id = batch.start_event_id, "failed to clean local batch artifacts");
+            return;
         }
 
         if let Err(error) = storage::mark_active_batch_written(db, batch) {
@@ -372,5 +484,173 @@ pub async fn run_parquet_actor(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::domain::schema::{self, PushArtifact};
+    use crate::infra::{manifest, parquet};
+
+    fn test_event(timestamp: i64) -> TelemetryEvent {
+        TelemetryEvent {
+            id: "evt-1".to_string(),
+            path: "/page".to_string(),
+            event_name: "click".to_string(),
+            metadata: serde_json::json!({"slot": "hero"}),
+            timestamp,
+        }
+    }
+
+    fn test_push_targets(write_manifest: bool) -> Vec<PushTarget> {
+        let mut artifacts = vec![PushArtifact::Parquet];
+        if write_manifest {
+            artifacts.push(PushArtifact::Manifest);
+        }
+
+        vec![PushTarget::mock_s3_compatible(
+            "lake_primary",
+            artifacts,
+            "bucket",
+            "dev",
+        )]
+    }
+
+    fn test_schemas() -> BTreeMap<u32, SchemaSpec> {
+        let schema_spec = schema::load_default_schema().unwrap();
+        BTreeMap::from([(schema_spec.version, schema_spec)])
+    }
+
+    #[test]
+    fn test_process_batch_cleans_local_files_after_uploaded_pushes_complete() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = storage::open_db(temp_dir.path().to_str().unwrap()).unwrap();
+        let output_dir = temp_dir.path().join("parquet_output");
+        let output_dir = output_dir.to_string_lossy().to_string();
+        let schema_spec = schema::load_default_schema().unwrap();
+        let event = test_event(1_700_000_000);
+        let batch = ActiveBatch {
+            start_event_id: 1,
+            len: 1,
+            status: ActiveBatchStatus::Writing,
+            schema_version: schema_spec.version,
+            timestamp_min: event.timestamp,
+            timestamp_max: event.timestamp,
+        };
+
+        storage::write_event(&db, &event).unwrap();
+        storage::store_active_batch(&db, batch).unwrap();
+        let write_result = parquet::write_parquet_batch_with_schema(
+            std::slice::from_ref(&event),
+            batch,
+            &output_dir,
+            &schema_spec,
+        )
+        .unwrap();
+        let manifest_path =
+            manifest::write_manifest(&output_dir, batch, &write_result.files).unwrap();
+        storage::mark_active_batch_push_uploaded(&db, batch, "lake_primary").unwrap();
+
+        let push_targets = test_push_targets(true);
+        let schemas = test_schemas();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime_handle = runtime.handle().clone();
+        let (ingest_tx, mut ingest_rx) = mpsc::channel(1);
+
+        process_batch(
+            &db,
+            batch,
+            ParquetBatchContext {
+                ingest_tx: &ingest_tx,
+                output_dir: &output_dir,
+                schemas: &schemas,
+                write_manifest: true,
+                runtime_handle: &runtime_handle,
+                push_targets: &push_targets,
+            },
+        );
+
+        runtime.block_on(async {
+            match ingest_rx.recv().await {
+                Some(IngestCmd::BatchDone {
+                    next_batch_start_id,
+                }) => {
+                    assert_eq!(next_batch_start_id, 2);
+                }
+                _ => panic!("expected BatchDone after cleanup"),
+            }
+        });
+
+        assert!(!Path::new(&write_result.files[0].path).exists());
+        assert!(!Path::new(&manifest_path).exists());
+        assert_eq!(storage::load_active_batch(&db).unwrap(), None);
+        assert!(storage::read_batch(&db, 1, 1).unwrap().is_empty());
+        assert!(
+            storage::load_active_batch_uploaded_pushes(&db)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_process_batch_finalizes_written_remote_batch_without_local_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = storage::open_db(temp_dir.path().to_str().unwrap()).unwrap();
+        let output_dir = temp_dir.path().join("parquet_output");
+        let output_dir = output_dir.to_string_lossy().to_string();
+        let schema_spec = schema::load_default_schema().unwrap();
+        let event = test_event(1_700_000_001);
+        let batch = ActiveBatch {
+            start_event_id: 1,
+            len: 1,
+            status: ActiveBatchStatus::Written,
+            schema_version: schema_spec.version,
+            timestamp_min: event.timestamp,
+            timestamp_max: event.timestamp,
+        };
+
+        storage::write_event(&db, &event).unwrap();
+        storage::store_active_batch(&db, batch).unwrap();
+
+        let push_targets = test_push_targets(false);
+        let schemas = test_schemas();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime_handle = runtime.handle().clone();
+        let (ingest_tx, mut ingest_rx) = mpsc::channel(1);
+
+        process_batch(
+            &db,
+            batch,
+            ParquetBatchContext {
+                ingest_tx: &ingest_tx,
+                output_dir: &output_dir,
+                schemas: &schemas,
+                write_manifest: false,
+                runtime_handle: &runtime_handle,
+                push_targets: &push_targets,
+            },
+        );
+
+        runtime.block_on(async {
+            match ingest_rx.recv().await {
+                Some(IngestCmd::BatchDone {
+                    next_batch_start_id,
+                }) => {
+                    assert_eq!(next_batch_start_id, 2);
+                }
+                _ => panic!("expected BatchDone for written remote batch"),
+            }
+        });
+
+        assert_eq!(storage::load_active_batch(&db).unwrap(), None);
+        assert!(storage::read_batch(&db, 1, 1).unwrap().is_empty());
+        assert!(
+            crate::infra::parquet::parquet_file_paths(&output_dir, batch.start_event_id).is_empty()
+        );
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ const ACTIVE_BATCH_STATUS_KEY: &str = "__meta_active_batch_status";
 const ACTIVE_BATCH_SCHEMA_VERSION_KEY: &str = "__meta_active_batch_schema_version";
 const ACTIVE_BATCH_TIMESTAMP_MIN_KEY: &str = "__meta_active_batch_timestamp_min";
 const ACTIVE_BATCH_TIMESTAMP_MAX_KEY: &str = "__meta_active_batch_timestamp_max";
+const ACTIVE_BATCH_UPLOADED_PUSHES_KEY: &str = "__meta_active_batch_uploaded_pushes";
 const CURRENT_SCHEMA_VERSION_KEY: &str = "__schema_current_version";
 const SCHEMA_VERSION_PREFIX: &str = "__schema_version_";
 
@@ -126,6 +127,25 @@ fn read_active_batch_status(
         }
         None => Ok(None),
     }
+}
+
+fn read_active_batch_uploaded_pushes(
+    db: &DB,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    match db.get(ACTIVE_BATCH_UPLOADED_PUSHES_KEY.as_bytes())? {
+        Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        None => Ok(BTreeSet::new()),
+    }
+}
+
+fn active_batch_identity(batch: ActiveBatch) -> (u64, usize, u32, i64, i64) {
+    (
+        batch.start_event_id,
+        batch.len,
+        batch.schema_version,
+        batch.timestamp_min,
+        batch.timestamp_max,
+    )
 }
 
 fn parse_event_id(key: &[u8]) -> Option<u64> {
@@ -392,6 +412,7 @@ fn clear_active_batch_metadata(batch: &mut WriteBatch) {
     batch.delete(ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_TIMESTAMP_MIN_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_TIMESTAMP_MAX_KEY.as_bytes());
+    batch.delete(ACTIVE_BATCH_UPLOADED_PUSHES_KEY.as_bytes());
 }
 
 pub fn load_or_initialize_metadata(
@@ -464,6 +485,12 @@ pub fn load_active_batch(
     }
 }
 
+pub fn load_active_batch_uploaded_pushes(
+    db: &DB,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    read_active_batch_uploaded_pushes(db)
+}
+
 pub fn store_active_batch(
     db: &DB,
     active_batch: ActiveBatch,
@@ -493,6 +520,34 @@ pub fn store_active_batch(
         ACTIVE_BATCH_TIMESTAMP_MAX_KEY.as_bytes(),
         timestamp_bytes(active_batch.timestamp_max),
     );
+    batch.delete(ACTIVE_BATCH_UPLOADED_PUSHES_KEY.as_bytes());
+    db.write(batch)?;
+    Ok(())
+}
+
+pub fn mark_active_batch_push_uploaded(
+    db: &DB,
+    active_batch: ActiveBatch,
+    push_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let push_name = push_name.trim();
+    if push_name.is_empty() {
+        return Err(invalid_data("uploaded push name cannot be empty").into());
+    }
+
+    let loaded = load_active_batch(db)?;
+    if loaded.map(active_batch_identity) != Some(active_batch_identity(active_batch)) {
+        return Err(invalid_data("active batch metadata does not match expected batch").into());
+    }
+
+    let mut uploaded_pushes = read_active_batch_uploaded_pushes(db)?;
+    uploaded_pushes.insert(push_name.to_string());
+
+    let mut batch = WriteBatch::default();
+    batch.put(
+        ACTIVE_BATCH_UPLOADED_PUSHES_KEY.as_bytes(),
+        serde_json::to_vec(&uploaded_pushes)?,
+    );
     db.write(batch)?;
     Ok(())
 }
@@ -502,21 +557,7 @@ pub fn mark_active_batch_written(
     active_batch: ActiveBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded = load_active_batch(db)?;
-    if loaded.map(|batch| {
-        (
-            batch.start_event_id,
-            batch.len,
-            batch.schema_version,
-            batch.timestamp_min,
-            batch.timestamp_max,
-        )
-    }) != Some((
-        active_batch.start_event_id,
-        active_batch.len,
-        active_batch.schema_version,
-        active_batch.timestamp_min,
-        active_batch.timestamp_max,
-    )) {
+    if loaded.map(active_batch_identity) != Some(active_batch_identity(active_batch)) {
         return Err(invalid_data("active batch metadata does not match expected batch").into());
     }
 

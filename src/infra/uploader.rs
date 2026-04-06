@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use object_store::aws::AmazonS3Builder;
+#[cfg(test)]
+use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
@@ -186,6 +188,25 @@ impl PushTarget {
             region,
             store: Arc::new(store),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock_s3_compatible(
+        name: &str,
+        artifacts: Vec<PushArtifact>,
+        bucket: &str,
+        prefix: &str,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: PushKind::S3Compatible,
+            artifacts,
+            bucket: bucket.to_string(),
+            prefix: normalize_object_prefix(prefix),
+            endpoint: "memory://mock".to_string(),
+            region: "test-region-1".to_string(),
+            store: Arc::new(InMemory::new()),
+        }
     }
 
     pub fn name(&self) -> &str {

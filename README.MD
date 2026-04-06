@@ -341,6 +341,8 @@ El servidor recupera el estado de RocksDB automaticamente:
 5. si falta alguno de los archivos → regenera el batch desde RocksDB
 6. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
 
+Si el batch tiene destinos `push`, `rustquet` tambien persiste que destinos ya completaron el upload. En un reinicio, reintenta solo los destinos pendientes y, cuando todos terminan bien, limpia los archivos locales del batch antes de borrar sus eventos de RocksDB.
+
 No se requiere intervencion manual.
 
 ## Archivos generados
@@ -391,6 +393,14 @@ Cada manifest incluye:
 El servidor escribe primero a archivos `.tmp` y luego hace `rename` atomico para garantizar consistencia.
 
 Si `push` contiene destinos remotos, despues de escribir los archivos locales `rustquet` sube los artifacts configurados para cada destino antes de limpiar el batch en RocksDB. Las keys remotas reutilizan el mismo layout relativo del dataset y pueden quedar precedidas por el prefijo resuelto desde el entorno.
+
+Cuando todos los destinos configurados para un batch terminan bien:
+
+- `rustquet` marca cada destino subido en RocksDB
+- elimina el `.parquet` local y el manifest local de ese batch
+- luego limpia los eventos del batch en RocksDB
+
+Si algun destino falla, no limpia ni los archivos locales ni los eventos del batch.
 
 ## Comandos
 
