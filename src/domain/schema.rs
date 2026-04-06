@@ -40,6 +40,37 @@ pub struct SchemaSpec {
     pub columns: Vec<IndexedColumn>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetSpec {
+    #[serde(default = "default_write_manifest")]
+    pub write_manifest: bool,
+}
+
+fn default_write_manifest() -> bool {
+    true
+}
+
+impl Default for DatasetSpec {
+    fn default() -> Self {
+        Self {
+            write_manifest: default_write_manifest(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSpec {
+    pub schema: SchemaSpec,
+    pub dataset: DatasetSpec,
+}
+
+#[derive(Deserialize)]
+struct ConfigFile {
+    schema: SchemaFile,
+    #[serde(default)]
+    dataset: DatasetSpec,
+}
+
 #[derive(Deserialize)]
 struct SchemaFile {
     schema_version: u32,
@@ -80,27 +111,41 @@ fn parse_source_path(
 pub fn load_schema_from_path(
     path: impl AsRef<Path>,
 ) -> Result<SchemaSpec, Box<dyn std::error::Error + Send + Sync>> {
-    let raw = fs::read_to_string(path)?;
-    let file: SchemaFile = serde_json::from_str(&raw)?;
+    Ok(load_config_from_path(path)?.schema)
+}
 
-    Ok(SchemaSpec {
-        version: file.schema_version,
-        columns: file
-            .columns
-            .into_iter()
-            .map(|column| {
-                Ok(IndexedColumn {
-                    name: column.name,
-                    path: parse_source_path(&column.source)?,
-                    kind: column.kind,
+pub fn load_config_from_path(
+    path: impl AsRef<Path>,
+) -> Result<ConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
+    let raw = fs::read_to_string(path)?;
+    let file: ConfigFile = serde_json::from_str(&raw)?;
+
+    Ok(ConfigSpec {
+        schema: SchemaSpec {
+            version: file.schema.schema_version,
+            columns: file
+                .schema
+                .columns
+                .into_iter()
+                .map(|column| {
+                    Ok(IndexedColumn {
+                        name: column.name,
+                        path: parse_source_path(&column.source)?,
+                        kind: column.kind,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?,
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?,
+        },
+        dataset: file.dataset,
     })
 }
 
+pub fn load_default_config() -> Result<ConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
+    load_config_from_path(DEFAULT_CONFIG_PATH)
+}
+
 pub fn load_default_schema() -> Result<SchemaSpec, Box<dyn std::error::Error + Send + Sync>> {
-    load_schema_from_path(DEFAULT_CONFIG_PATH)
+    load_default_config().map(|config| config.schema)
 }
 
 pub fn is_reserved_column_name(name: &str) -> bool {

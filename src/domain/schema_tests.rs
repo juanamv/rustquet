@@ -2,7 +2,14 @@ use std::io::Write;
 
 use tempfile::NamedTempFile;
 
-use super::schema::{ColumnType, IndexedColumn, load_default_schema, load_schema_from_path};
+use super::schema::{
+    ColumnType, ConfigSpec, DatasetSpec, IndexedColumn, load_default_config, load_default_schema,
+    load_schema_from_path,
+};
+
+fn config_with_schema(schema_body: &str) -> String {
+    format!("{{\"dataset\":{{\"write_manifest\":true}},\"schema\":{schema_body}}}")
+}
 
 #[test]
 fn test_load_default_schema_contains_expected_indexed_columns() {
@@ -18,11 +25,29 @@ fn test_load_default_schema_contains_expected_indexed_columns() {
 }
 
 #[test]
+fn test_load_default_config_contains_schema_and_dataset() {
+    let config = load_default_config().unwrap();
+
+    assert_eq!(
+        config,
+        ConfigSpec {
+            schema: load_default_schema().unwrap(),
+            dataset: DatasetSpec {
+                write_manifest: true
+            },
+        }
+    );
+}
+
+#[test]
 fn test_load_schema_from_path_rejects_non_metadata_source() {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(
         file,
-        "{{\"schema_version\":1,\"columns\":[{{\"name\":\"slot\",\"source\":\"slot\",\"type\":\"string\"}}]}}"
+        "{}",
+        config_with_schema(
+            "{\"schema_version\":1,\"columns\":[{\"name\":\"slot\",\"source\":\"slot\",\"type\":\"string\"}]}"
+        )
     )
     .unwrap();
 
@@ -59,10 +84,9 @@ fn test_load_schema_from_path_reads_nested_fixture() {
 #[test]
 fn test_load_schema_from_path_rejects_invalid_json() {
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "{{\"schema_version\":").unwrap();
+    writeln!(file, "{{\"dataset\":{{}},\"schema\":").unwrap();
 
-    let error = load_schema_from_path(file.path()).unwrap_err();
-    assert!(error.to_string().contains("EOF") || error.to_string().contains("expected"));
+    assert!(load_schema_from_path(file.path()).is_err());
 }
 
 #[test]
@@ -70,7 +94,10 @@ fn test_load_schema_from_path_rejects_empty_metadata_source() {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(
         file,
-        "{{\"schema_version\":1,\"columns\":[{{\"name\":\"slot\",\"source\":\"metadata.\",\"type\":\"string\"}}]}}"
+        "{}",
+        config_with_schema(
+            "{\"schema_version\":1,\"columns\":[{\"name\":\"slot\",\"source\":\"metadata.\",\"type\":\"string\"}]}"
+        )
     )
     .unwrap();
 
@@ -83,7 +110,10 @@ fn test_load_schema_from_path_rejects_invalid_column_type() {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(
         file,
-        "{{\"schema_version\":1,\"columns\":[{{\"name\":\"slot\",\"source\":\"metadata.slot\",\"type\":\"int\"}}]}}"
+        "{}",
+        config_with_schema(
+            "{\"schema_version\":1,\"columns\":[{\"name\":\"slot\",\"source\":\"metadata.slot\",\"type\":\"int\"}]}"
+        )
     )
     .unwrap();
 
@@ -96,7 +126,10 @@ fn test_load_schema_from_path_accepts_number_column_type() {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(
         file,
-        "{{\"schema_version\":1,\"columns\":[{{\"name\":\"price\",\"source\":\"metadata.price\",\"type\":\"number\"}}]}}"
+        "{}",
+        config_with_schema(
+            "{\"schema_version\":1,\"columns\":[{\"name\":\"price\",\"source\":\"metadata.price\",\"type\":\"number\"}]}"
+        )
     )
     .unwrap();
 

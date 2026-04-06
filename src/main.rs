@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config_path = config::schema_config_path_from_args(std::env::args());
     let db = storage::open_db(config::DB_PATH)?;
-    let active_schema = schema::load_schema_from_path(&config_path)?;
+    let loaded_config = schema::load_config_from_path(&config_path)?;
+    let active_schema = loaded_config.schema;
     let schemas = Arc::new(storage::ensure_schema(&db, &active_schema)?);
 
     let (ingest_tx, ingest_rx) = mpsc::channel(config::INGEST_CHANNEL_CAPACITY);

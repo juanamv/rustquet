@@ -96,7 +96,12 @@ curl -X POST http://127.0.0.1:3000/ingest \
 
 ## Schema de configuracion
 
-El archivo `config.json` define la version del schema y las columnas indexadas a extraer de `metadata`.
+El archivo `config.json` define dos secciones:
+
+- `schema`: version y columnas indexadas a extraer de `metadata`
+- `dataset`: descripcion del dataset generado por `rustquet`
+
+Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` produce. El particionado no se configura desde el archivo: el sistema lo decide internamente para mantener un layout consistente y robusto.
 
 **Formatos disponibles en el repositorio:**
 
@@ -107,33 +112,39 @@ El archivo `config.json` define la version del schema y las columnas indexadas a
 | `config_v2_overwrite.json` | 2 | invalido: sobrescribe tipo de `h2o` |
 | `config_v3_nested.json` | 3 | agrega `country` via path anidado |
 
-**Estructura del schema:**
+**Estructura del archivo:**
 
 ```json
 {
-  "schema_version": 1,
-  "columns": [
-    {
-      "name": "h2o",
-      "source": "metadata.h2o",
-      "type": "boolean"
-    },
-    {
-      "name": "slot",
-      "source": "metadata.slot",
-      "type": "string"
-    }
-  ]
+  "dataset": {
+    "write_manifest": true
+  },
+  "schema": {
+    "schema_version": 1,
+    "columns": [
+      {
+        "name": "h2o",
+        "source": "metadata.h2o",
+        "type": "boolean"
+      },
+      {
+        "name": "slot",
+        "source": "metadata.slot",
+        "type": "string"
+      }
+    ]
+  }
 }
 ```
 
 | Campo | Requisito | Descripcion |
 |-------|-----------|-------------|
-| `schema_version` | obligatorio | numero entero, debe crecer con cada version |
-| `columns` | obligatorio | lista de columnas indexadas |
-| `name` | obligatorio | nombre de la columna en Parquet |
-| `source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
-| `type` | obligatorio | `boolean`, `string` o `number` |
+| `dataset.write_manifest` | obligatorio | indica si el dataset expone manifests por batch; hoy `true` |
+| `schema.schema_version` | obligatorio | numero entero, debe crecer con cada version |
+| `schema.columns` | obligatorio | lista de columnas indexadas |
+| `schema.columns[].name` | obligatorio | nombre de la columna en Parquet |
+| `schema.columns[].source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
+| `schema.columns[].type` | obligatorio | `boolean`, `string` o `number` |
 
 **Reglas de versionado:**
 
@@ -146,6 +157,12 @@ El archivo `config.json` define la version del schema y las columnas indexadas a
 - `boolean` -> columna Parquet `Boolean`
 - `string` -> columna Parquet `Utf8`
 - `number` -> columna Parquet `Float64`; acepta enteros y decimales JSON sin distinguirlos en el schema
+
+**Particionado del dataset:**
+
+- no se define en `config.json`
+- `rustquet` lo resuelve internamente a partir del rango temporal del batch
+- hoy los archivos se organizan por `date_start` y `date_end`
 
 ## Columnas Parquet
 
