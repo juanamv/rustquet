@@ -45,7 +45,7 @@ pub fn schema_config_path_from_args<I>(args: I) -> String
 where
     I: IntoIterator<Item = String>,
 {
-    first_user_argument(args).unwrap_or_else(|| schema::schema::DEFAULT_CONFIG_PATH.to_string())
+    first_user_argument(args).unwrap_or_else(|| schema::DEFAULT_CONFIG_PATH.to_string())
 }
 
 fn string_from_env_or_default(
@@ -102,7 +102,7 @@ where
         )?,
         schema_config_path: first_user_argument(args)
             .or_else(|| env_getter(SCHEMA_CONFIG_PATH_ENV))
-            .unwrap_or_else(|| schema::schema::DEFAULT_CONFIG_PATH.to_string()),
+            .unwrap_or_else(|| schema::DEFAULT_CONFIG_PATH.to_string()),
     })
 }
 

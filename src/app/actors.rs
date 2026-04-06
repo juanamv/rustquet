@@ -5,7 +5,7 @@ use rocksdb::DB;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::domain::models::TelemetryEvent;
-use crate::domain::schema::schema::SchemaSpec;
+use crate::domain::schema::SchemaSpec;
 use crate::infra::storage::{self, ActiveBatch, ActiveBatchStatus};
 use crate::infra::uploader::PushTarget;
 

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = config::load_runtime_config(std::env::args())?;
-    let loaded_config = schema::schema::load_config_from_path(&runtime.schema_config_path)?;
+    let loaded_config = schema::load_config_from_path(&runtime.schema_config_path)?;
     let active_schema = loaded_config.schema.clone();
     let db = storage::open_db(&runtime.db_path)?;
     let schemas = Arc::new(storage::ensure_schema(&db, &active_schema)?);
