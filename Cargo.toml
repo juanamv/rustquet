@@ -21,5 +21,9 @@ dotenvy = "0.15.7"
 object_store = { version = "0.13.2", features = ["aws"] }
 
 [[bench]]
-name = "macrobench"
+name = "ingest_bench"
+harness = false
+
+[[bench]]
+name = "end_to_end_bench"
 harness = false

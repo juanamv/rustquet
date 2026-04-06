@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
-use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkGroup, Criterion, Throughput};
 use rocksdb::DB;
 use rustquet::{actors, config, routes, schema, storage};
 use tempfile::TempDir;
@@ -12,14 +12,13 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
 use tower::util::ServiceExt;
 
-const FIXED_TIMESTAMP: i64 = 1_735_603_200;
+pub const FIXED_TIMESTAMP: i64 = 1_735_603_200;
+
 const WAIT_ATTEMPTS: usize = 120;
 const WAIT_INTERVAL: Duration = Duration::from_millis(100);
-const REQUEST_SAMPLE_SIZE: usize = 512;
-const END_TO_END_BATCH_SIZE: usize = 1_000;
 
-struct BenchHarness {
-    runtime: Runtime,
+pub struct BenchHarness {
+    pub runtime: Runtime,
     app: axum::Router,
     ingest_tx: mpsc::Sender<actors::IngestCmd>,
     db: Arc<DB>,
@@ -29,7 +28,7 @@ struct BenchHarness {
 }
 
 impl BenchHarness {
-    fn new(batch_size: u64, write_manifest: bool) -> Self {
+    pub fn new(batch_size: u64, write_manifest: bool) -> Self {
         let runtime = Builder::new_multi_thread()
             .enable_all()
             .worker_threads(2)
@@ -84,7 +83,7 @@ impl BenchHarness {
         }
     }
 
-    async fn send_payloads(&self, payloads: &[Bytes]) {
+    pub async fn send_payloads(&self, payloads: &[Bytes]) {
         for (index, payload) in payloads.iter().enumerate() {
             let response: axum::response::Response = self
                 .app
@@ -101,7 +100,7 @@ impl BenchHarness {
         }
     }
 
-    async fn wait_for_state(
+    pub async fn wait_for_state(
         &self,
         expected_parquet_files: usize,
         expected_manifest_files: usize,
@@ -130,7 +129,7 @@ impl BenchHarness {
         );
     }
 
-    async fn shutdown_and_drain(
+    pub async fn shutdown_and_drain(
         &self,
         expected_parquet_files: usize,
         expected_manifest_files: usize,
@@ -142,6 +141,41 @@ impl BenchHarness {
         self.wait_for_state(expected_parquet_files, expected_manifest_files, 0)
             .await;
     }
+}
+
+pub fn build_payloads(prefix: &str, count: usize) -> Vec<Bytes> {
+    (0..count)
+        .map(|index| {
+            Bytes::from(
+                serde_json::json!({
+                    "id": format!("{prefix}-{index}"),
+                    "path": format!("/bench/{}", index % 32),
+                    "event_name": if index % 2 == 0 { "click" } else { "scroll" },
+                    "timestamp": FIXED_TIMESTAMP,
+                    "metadata": {
+                        "h2o": index % 2 == 0,
+                        "slot": format!("slot-{}", index % 8),
+                    }
+                })
+                .to_string(),
+            )
+        })
+        .collect()
+}
+
+pub fn configure_group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+    elements: u64,
+    sample_size: usize,
+    measurement_time: Duration,
+) -> BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut group = c.benchmark_group(name);
+    group.throughput(Throughput::Elements(elements));
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(measurement_time);
+    group.sample_size(sample_size);
+    group
 }
 
 fn collect_files_with_extension(root: &Path, extension: &str, files: &mut Vec<PathBuf>) {
@@ -180,106 +214,3 @@ fn build_request(body: Bytes) -> Request<Body> {
         .body(Body::from(body))
         .expect("failed to build benchmark request")
 }
-
-fn build_payloads(prefix: &str, count: usize) -> Vec<Bytes> {
-    (0..count)
-        .map(|index| {
-            Bytes::from(
-                serde_json::json!({
-                    "id": format!("{prefix}-{index}"),
-                    "path": format!("/bench/{}", index % 32),
-                    "event_name": if index % 2 == 0 { "click" } else { "scroll" },
-                    "timestamp": FIXED_TIMESTAMP,
-                    "metadata": {
-                        "h2o": index % 2 == 0,
-                        "slot": format!("slot-{}", index % 8),
-                    }
-                })
-                .to_string(),
-            )
-        })
-        .collect()
-}
-
-fn configure_group<'a>(
-    c: &'a mut Criterion,
-    name: &str,
-    elements: u64,
-    sample_size: usize,
-    measurement_time: Duration,
-) -> BenchmarkGroup<'a, criterion::measurement::WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.throughput(Throughput::Elements(elements));
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(measurement_time);
-    group.sample_size(sample_size);
-    group
-}
-
-fn bench_ingest_requests(c: &mut Criterion) {
-    let payloads = build_payloads("criterion-ingest", REQUEST_SAMPLE_SIZE);
-    let mut group = configure_group(
-        c,
-        "macro_ingest",
-        REQUEST_SAMPLE_SIZE as u64,
-        20,
-        Duration::from_secs(10),
-    );
-
-    group.bench_function("requests_512_ack_path", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-
-            for _ in 0..iters {
-                let harness = BenchHarness::new((REQUEST_SAMPLE_SIZE as u64) * 2, false);
-                let started = Instant::now();
-
-                harness.runtime.block_on(harness.send_payloads(&payloads));
-
-                total += started.elapsed();
-                harness.runtime.block_on(harness.shutdown_and_drain(1, 0));
-            }
-
-            total
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_end_to_end_batch(c: &mut Criterion) {
-    let payloads = build_payloads("criterion-batch", END_TO_END_BATCH_SIZE);
-    let mut group = configure_group(
-        c,
-        "macro_end_to_end",
-        END_TO_END_BATCH_SIZE as u64,
-        10,
-        Duration::from_secs(15),
-    );
-
-    group.bench_function("batch_1000_to_parquet", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-
-            for _ in 0..iters {
-                let harness = BenchHarness::new(END_TO_END_BATCH_SIZE as u64, true);
-                let started = Instant::now();
-
-                harness.runtime.block_on(async {
-                    harness.send_payloads(&payloads).await;
-                    harness.wait_for_state(1, 1, 0).await;
-                });
-
-                total += started.elapsed();
-                harness.runtime.block_on(harness.shutdown_and_drain(1, 1));
-            }
-
-            total
-        });
-    });
-
-    group.finish();
-}
-
-criterion_group!(macrobench, bench_ingest_requests, bench_end_to_end_batch);
-criterion_main!(macrobench);

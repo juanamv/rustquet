@@ -361,8 +361,11 @@ cargo test
 # ejecutar tests de integracion
 cargo test --test '*'
 
-# ejecutar macrobenchmarks en proceso con criterion
-cargo bench --bench macrobench
+# ejecutar benchmark de absorcion de ingesta
+cargo bench --bench ingest_bench
+
+# ejecutar benchmark end-to-end hasta parquet
+cargo bench --bench end_to_end_bench
 
 # verificar documentacion
 cargo doc
