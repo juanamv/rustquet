@@ -5,3 +5,4 @@
 tests.rs
 .env
 manifests
+target_schema_versioning
