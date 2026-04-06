@@ -5,6 +5,7 @@ use sysinfo::System;
 use crate::domain::schema;
 
 pub const BATCH_SIZE: u64 = 10_000;
+pub const BATCH_MAX_AGE_MS: u64 = 0;
 pub const INGEST_CHANNEL_CAPACITY: usize = 8_192;
 pub const MAX_INGEST_CHANNEL_CAPACITY: usize = 65_536;
 pub const PARQUET_CHANNEL_CAPACITY: usize = 1;
@@ -22,6 +23,7 @@ const SERVER_ADDR_ENV: &str = "SERVER_ADDR";
 const DB_PATH_ENV: &str = "DB_PATH";
 const PARQUET_OUTPUT_DIR_ENV: &str = "PARQUET_OUTPUT_DIR";
 const BATCH_SIZE_ENV: &str = "BATCH_SIZE";
+const BATCH_MAX_AGE_MS_ENV: &str = "BATCH_MAX_AGE_MS";
 const INGEST_CHANNEL_CAPACITY_ENV: &str = "INGEST_CHANNEL_CAPACITY";
 const PARQUET_CHANNEL_CAPACITY_ENV: &str = "PARQUET_CHANNEL_CAPACITY";
 const SCHEMA_CONFIG_PATH_ENV: &str = "SCHEMA_CONFIG_PATH";
@@ -33,6 +35,7 @@ pub struct RuntimeConfig {
     pub db_path: String,
     pub parquet_output_dir: String,
     pub batch_size: u64,
+    pub batch_max_age_ms: u64,
     pub ingest_channel_capacity: usize,
     pub parquet_channel_capacity: usize,
     pub schema_config_path: String,
@@ -158,6 +161,11 @@ where
             PARQUET_OUTPUT_DIR,
         ),
         batch_size: parse_from_env_or_default(&env_getter, BATCH_SIZE_ENV, BATCH_SIZE)?,
+        batch_max_age_ms: parse_from_env_or_default(
+            &env_getter,
+            BATCH_MAX_AGE_MS_ENV,
+            BATCH_MAX_AGE_MS,
+        )?,
         ingest_channel_capacity: parse_from_env_or_else(
             &env_getter,
             INGEST_CHANNEL_CAPACITY_ENV,

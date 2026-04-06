@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rocksdb::DB;
 use tokio::sync::{mpsc, oneshot};
@@ -31,6 +32,11 @@ pub enum ParquetCmd {
     ProcessBatch { batch: ActiveBatch },
 }
 
+enum IngestActorEvent {
+    Command(Option<IngestCmd>),
+    TimeoutExpired,
+}
+
 // ── IngestActor ────────────────────────────────────────────────────
 // Single writer to RocksDB. It persists incoming events and only sends
 // a compact batch reference to the ParquetActor. Batch state is stored
@@ -50,6 +56,7 @@ fn pending_batch_len(
     next_batch_start_id: u64,
     batch_size: u64,
     shutting_down: bool,
+    timeout_expired: bool,
 ) -> usize {
     let pending_events = next_event_id.saturating_sub(next_batch_start_id);
 
@@ -57,8 +64,77 @@ fn pending_batch_len(
         pending_events as usize
     } else if pending_events >= batch_size {
         batch_size as usize
+    } else if timeout_expired {
+        pending_events as usize
     } else {
         0
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn undispatched_tail_start(next_batch_start_id: u64, active_batch: Option<ActiveBatch>) -> u64 {
+    active_batch
+        .map(|batch| batch.start_event_id + batch.len as u64)
+        .unwrap_or(next_batch_start_id)
+}
+
+fn sync_pending_batch_opened_at_ms(
+    db: &DB,
+    pending_batch_opened_at_ms: &mut Option<u64>,
+    desired: Option<u64>,
+) {
+    if *pending_batch_opened_at_ms == desired {
+        return;
+    }
+
+    match storage::set_pending_batch_opened_at_ms(db, desired) {
+        Ok(()) => *pending_batch_opened_at_ms = desired,
+        Err(error) => {
+            error!(error = %error, "failed to persist pending batch timeout metadata");
+        }
+    }
+}
+
+fn timeout_expired(
+    batch_max_age_ms: u64,
+    pending_batch_opened_at_ms: Option<u64>,
+    next_event_id: u64,
+    next_batch_start_id: u64,
+) -> bool {
+    if batch_max_age_ms == 0 || next_event_id == next_batch_start_id {
+        return false;
+    }
+
+    let Some(opened_at_ms) = pending_batch_opened_at_ms else {
+        return false;
+    };
+
+    now_unix_ms().saturating_sub(opened_at_ms) >= batch_max_age_ms
+}
+
+fn next_timeout_wait(
+    batch_max_age_ms: u64,
+    pending_batch_opened_at_ms: Option<u64>,
+    next_event_id: u64,
+    next_batch_start_id: u64,
+) -> Option<Duration> {
+    if batch_max_age_ms == 0 || next_event_id == next_batch_start_id {
+        return None;
+    }
+
+    let opened_at_ms = pending_batch_opened_at_ms?;
+    let elapsed_ms = now_unix_ms().saturating_sub(opened_at_ms);
+    if elapsed_ms >= batch_max_age_ms {
+        None
+    } else {
+        Some(Duration::from_millis(batch_max_age_ms - elapsed_ms))
     }
 }
 
@@ -67,26 +143,42 @@ pub async fn run_ingest_actor(
     mut rx: mpsc::Receiver<IngestCmd>,
     parquet_tx: mpsc::Sender<ParquetCmd>,
     batch_size: u64,
+    batch_max_age_ms: u64,
     schema_version: u32,
 ) {
     let metadata =
         storage::load_or_initialize_metadata(&db).expect("failed to load metadata from rocksdb");
     let mut next_event_id = metadata.next_event_id;
     let mut next_batch_start_id = metadata.next_batch_start_id;
+    let mut pending_batch_opened_at_ms = metadata.pending_batch_opened_at_ms;
     let mut active_batch = storage::load_active_batch(&db).expect("failed to load active batch");
     let mut parquet_in_flight = false;
     let mut shutting_down = false;
+
+    let initial_tail_start = undispatched_tail_start(next_batch_start_id, active_batch);
+    if next_event_id == initial_tail_start {
+        sync_pending_batch_opened_at_ms(&db, &mut pending_batch_opened_at_ms, None);
+    } else if pending_batch_opened_at_ms.is_none() {
+        sync_pending_batch_opened_at_ms(&db, &mut pending_batch_opened_at_ms, Some(now_unix_ms()));
+    }
 
     loop {
         if !parquet_in_flight {
             let batch_to_dispatch = if let Some(batch) = active_batch {
                 Some(batch)
             } else {
+                let batch_timeout_expired = timeout_expired(
+                    batch_max_age_ms,
+                    pending_batch_opened_at_ms,
+                    next_event_id,
+                    next_batch_start_id,
+                );
                 let batch_len = pending_batch_len(
                     next_event_id,
                     next_batch_start_id,
                     batch_size,
                     shutting_down,
+                    batch_timeout_expired,
                 );
 
                 if batch_len > 0 {
@@ -110,6 +202,17 @@ pub async fn run_ingest_actor(
 
                     match storage::store_active_batch(&db, batch) {
                         Ok(()) => {
+                            let remaining_tail_start = batch.start_event_id + batch.len as u64;
+                            let desired_opened_at_ms = if next_event_id > remaining_tail_start {
+                                Some(now_unix_ms())
+                            } else {
+                                None
+                            };
+                            sync_pending_batch_opened_at_ms(
+                                &db,
+                                &mut pending_batch_opened_at_ms,
+                                desired_opened_at_ms,
+                            );
                             active_batch = Some(batch);
                             Some(batch)
                         }
@@ -130,18 +233,50 @@ pub async fn run_ingest_actor(
             }
         }
 
-        let Some(cmd) = rx.recv().await else {
-            shutting_down = true;
-            continue;
+        let next_event = if !parquet_in_flight && active_batch.is_none() {
+            match next_timeout_wait(
+                batch_max_age_ms,
+                pending_batch_opened_at_ms,
+                next_event_id,
+                next_batch_start_id,
+            ) {
+                Some(wait) => {
+                    tokio::select! {
+                        cmd = rx.recv() => IngestActorEvent::Command(cmd),
+                        _ = tokio::time::sleep(wait) => IngestActorEvent::TimeoutExpired,
+                    }
+                }
+                None => IngestActorEvent::Command(rx.recv().await),
+            }
+        } else {
+            IngestActorEvent::Command(rx.recv().await)
+        };
+
+        let cmd = match next_event {
+            IngestActorEvent::TimeoutExpired => continue,
+            IngestActorEvent::Command(Some(cmd)) => cmd,
+            IngestActorEvent::Command(None) => {
+                shutting_down = true;
+                continue;
+            }
         };
 
         match cmd {
             IngestCmd::WriteEvent { event, ack } => {
+                let tail_start = undispatched_tail_start(next_batch_start_id, active_batch);
                 if let Err(error) =
                     storage::append_event(&db, next_event_id, &event, next_event_id + 1)
                 {
                     error!(error = %error, event_id = next_event_id, "failed to append event");
                     continue;
+                }
+
+                if pending_batch_opened_at_ms.is_none() && next_event_id == tail_start {
+                    sync_pending_batch_opened_at_ms(
+                        &db,
+                        &mut pending_batch_opened_at_ms,
+                        Some(now_unix_ms()),
+                    );
                 }
 
                 next_event_id += 1;
@@ -153,6 +288,16 @@ pub async fn run_ingest_actor(
                 next_batch_start_id = committed_next_batch_start_id;
                 active_batch = None;
                 parquet_in_flight = false;
+
+                if next_event_id == next_batch_start_id {
+                    sync_pending_batch_opened_at_ms(&db, &mut pending_batch_opened_at_ms, None);
+                } else if pending_batch_opened_at_ms.is_none() {
+                    sync_pending_batch_opened_at_ms(
+                        &db,
+                        &mut pending_batch_opened_at_ms,
+                        Some(now_unix_ms()),
+                    );
+                }
             }
             IngestCmd::Shutdown => {
                 shutting_down = true;

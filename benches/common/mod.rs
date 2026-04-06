@@ -56,6 +56,7 @@ impl BenchHarness {
                 ingest_rx,
                 parquet_tx,
                 batch_size,
+                config::BATCH_MAX_AGE_MS,
                 active_schema.version,
             ));
             tokio::spawn(actors::run_parquet_actor(

@@ -9,6 +9,7 @@ use crate::domain::schema::{self, IndexedColumn, SchemaSpec};
 
 const NEXT_EVENT_ID_KEY: &str = "__meta_next_event_id";
 const NEXT_BATCH_START_ID_KEY: &str = "__meta_next_batch_start_id";
+const PENDING_BATCH_OPENED_AT_MS_KEY: &str = "__meta_pending_batch_opened_at_ms";
 const ACTIVE_BATCH_START_ID_KEY: &str = "__meta_active_batch_start_id";
 const ACTIVE_BATCH_LEN_KEY: &str = "__meta_active_batch_len";
 const ACTIVE_BATCH_STATUS_KEY: &str = "__meta_active_batch_status";
@@ -23,6 +24,7 @@ const SCHEMA_VERSION_PREFIX: &str = "__schema_version_";
 pub struct Metadata {
     pub next_event_id: u64,
     pub next_batch_start_id: u64,
+    pub pending_batch_opened_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,6 +552,14 @@ fn persist_metadata(
         NEXT_BATCH_START_ID_KEY.as_bytes(),
         metadata_bytes(metadata.next_batch_start_id),
     );
+    if let Some(opened_at_ms) = metadata.pending_batch_opened_at_ms {
+        batch.put(
+            PENDING_BATCH_OPENED_AT_MS_KEY.as_bytes(),
+            metadata_bytes(opened_at_ms),
+        );
+    } else {
+        batch.delete(PENDING_BATCH_OPENED_AT_MS_KEY.as_bytes());
+    }
     db.write(batch)?;
     Ok(())
 }
@@ -569,11 +579,14 @@ pub fn load_or_initialize_metadata(
 ) -> Result<Metadata, Box<dyn std::error::Error + Send + Sync>> {
     let next_event_id = read_metadata_value(db, NEXT_EVENT_ID_KEY.as_bytes())?;
     let next_batch_start_id = read_metadata_value(db, NEXT_BATCH_START_ID_KEY.as_bytes())?;
+    let pending_batch_opened_at_ms =
+        read_metadata_value(db, PENDING_BATCH_OPENED_AT_MS_KEY.as_bytes())?;
 
     if let (Some(next_event_id), Some(next_batch_start_id)) = (next_event_id, next_batch_start_id) {
         return Ok(Metadata {
             next_event_id,
             next_batch_start_id,
+            pending_batch_opened_at_ms,
         });
     }
 
@@ -581,10 +594,12 @@ pub fn load_or_initialize_metadata(
         Some((min_event_id, max_event_id)) => Metadata {
             next_event_id: max_event_id + 1,
             next_batch_start_id: min_event_id,
+            pending_batch_opened_at_ms: None,
         },
         None => Metadata {
             next_event_id: 1,
             next_batch_start_id: 1,
+            pending_batch_opened_at_ms: None,
         },
     };
 
@@ -738,6 +753,15 @@ pub fn finalize_active_batch(
     db.write(batch)?;
 
     Ok(next_batch_start_id)
+}
+
+pub fn set_pending_batch_opened_at_ms(
+    db: &DB,
+    pending_batch_opened_at_ms: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut metadata = load_or_initialize_metadata(db)?;
+    metadata.pending_batch_opened_at_ms = pending_batch_opened_at_ms;
+    persist_metadata(db, metadata)
 }
 
 #[allow(dead_code)]
