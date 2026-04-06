@@ -6,9 +6,9 @@
     {
       "name": "lake_primary",
       "kind": "s3_compatible",
-      "bucket": "telemetry-bucket",
-      "prefix": "rustquet/prod",
-      "endpoint": "http://127.0.0.1:9000",
+      "bucket": "bucket",
+      "prefix": "dev/",
+      "endpoint": "http://127.0.0.1:9222",
       "region": "us-east-1",
       "allow_http": true,
       "env": {
@@ -18,13 +18,8 @@
     }
   ],
   "schema": {
-    "schema_version": 1,
+    "schema_version": 3,
     "columns": [
-      {
-        "name": "h2o",
-        "source": "metadata.h2o",
-        "type": "boolean"
-      },
       {
         "name": "slot",
         "source": "metadata.slot",

@@ -70,6 +70,127 @@ fn invalid_data(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
 
+fn format_column(column: &IndexedColumn) -> String {
+    format!(
+        "{} <- metadata.{} ({})",
+        column.name,
+        column.path.join("."),
+        match column.kind {
+            schema::ColumnType::Bool => "boolean",
+            schema::ColumnType::String => "string",
+            schema::ColumnType::Number => "number",
+        }
+    )
+}
+
+fn format_schema_columns(schema_spec: &SchemaSpec) -> String {
+    if schema_spec.columns.is_empty() {
+        return "  - (no indexed columns)".to_string();
+    }
+
+    schema_spec
+        .columns
+        .iter()
+        .map(|column| format!("  - {}", format_column(column)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn schema_definition_conflict_message(existing: &SchemaSpec, requested: &SchemaSpec) -> String {
+    let mut differences = Vec::new();
+    let mut requested_columns = HashMap::with_capacity(requested.columns.len());
+    for column in &requested.columns {
+        requested_columns.insert(column.name.as_str(), column);
+    }
+
+    for existing_column in &existing.columns {
+        match requested_columns.get(existing_column.name.as_str()) {
+            Some(requested_column) if *requested_column == existing_column => {}
+            Some(requested_column) => differences.push(format!(
+                "  - changed '{}' from {} to {}",
+                existing_column.name,
+                format_column(existing_column),
+                format_column(requested_column)
+            )),
+            None => differences.push(format!(
+                "  - removed '{}' ({})",
+                existing_column.name,
+                format_column(existing_column)
+            )),
+        }
+    }
+
+    for requested_column in &requested.columns {
+        if existing
+            .columns
+            .iter()
+            .all(|column| column.name != requested_column.name)
+        {
+            differences.push(format!(
+                "  - added '{}' ({})",
+                requested_column.name,
+                format_column(requested_column)
+            ));
+        }
+    }
+
+    format!(
+        "schema version {} already exists with a different definition\n\
+stored schema:\n{}\n\
+requested schema:\n{}\n\
+differences:\n{}\n\
+action: increment schema.schema_version for the new definition",
+        existing.version,
+        format_schema_columns(existing),
+        format_schema_columns(requested),
+        differences.join("\n")
+    )
+}
+
+fn schema_downgrade_message(current_version: u32, requested_version: u32) -> String {
+    format!(
+        "schema version downgrade is not allowed: requested version {}, current stored version {}\n\
+action: keep the current schema version or bump schema.schema_version to a newer version",
+        requested_version, current_version
+    )
+}
+
+fn append_only_schema_message(
+    current_schema: &SchemaSpec,
+    new_schema: &SchemaSpec,
+    detail: String,
+) -> String {
+    format!(
+        "new schema version {} must preserve existing indexed columns from version {}\n\
+current schema:\n{}\n\
+requested schema:\n{}\n\
+details:\n{}\n\
+action: keep existing indexed columns unchanged and only append new columns in a higher schema version",
+        new_schema.version,
+        current_schema.version,
+        format_schema_columns(current_schema),
+        format_schema_columns(new_schema),
+        detail
+    )
+}
+
+fn historical_redefinition_message(
+    existing: &IndexedColumn,
+    new_schema: &SchemaSpec,
+    requested: &IndexedColumn,
+) -> String {
+    format!(
+        "new schema version {} cannot redefine indexed column '{}'\n\
+existing definition: {}\n\
+requested definition: {}\n\
+action: preserve the historical column definition and add a new column with a different name if needed",
+        new_schema.version,
+        existing.name,
+        format_column(existing),
+        format_column(requested)
+    )
+}
+
 fn event_key(event_id: u64) -> String {
     format!("event_{event_id:010}")
 }
@@ -234,10 +355,28 @@ fn validate_append_only_schema(
     for current_column in &current_schema.columns {
         match new_columns.get(current_column.name.as_str()) {
             Some(column) if *column == current_column => {}
+            Some(column) => {
+                return Err(invalid_data(&append_only_schema_message(
+                    current_schema,
+                    new_schema,
+                    format!(
+                        "  - column '{}' changed from {} to {}",
+                        current_column.name,
+                        format_column(current_column),
+                        format_column(column)
+                    ),
+                ))
+                .into());
+            }
             _ => {
-                return Err(invalid_data(
-                    "new schema version must preserve existing indexed columns",
-                )
+                return Err(invalid_data(&append_only_schema_message(
+                    current_schema,
+                    new_schema,
+                    format!(
+                        "  - column '{}' is missing from the requested schema",
+                        current_column.name
+                    ),
+                ))
                 .into());
             }
         }
@@ -247,9 +386,10 @@ fn validate_append_only_schema(
         if let Some(existing) = historical.get(column.name.as_str())
             && *existing != column
         {
-            return Err(
-                invalid_data("new schema version cannot redefine an indexed column").into(),
-            );
+            return Err(invalid_data(&historical_redefinition_message(
+                existing, new_schema, column,
+            ))
+            .into());
         }
     }
 
@@ -319,7 +459,9 @@ pub fn ensure_schema(
             return Err(invalid_data("current schema version is missing from rocksdb").into());
         }
         if schema_spec.version < version {
-            return Err(invalid_data("schema version downgrade is not allowed").into());
+            return Err(
+                invalid_data(&schema_downgrade_message(version, schema_spec.version)).into(),
+            );
         }
     } else if !schemas.is_empty() {
         return Err(invalid_data("stored schemas exist without a current schema version").into());
@@ -328,7 +470,7 @@ pub fn ensure_schema(
     match schemas.get(&schema_spec.version) {
         Some(existing) if existing != schema_spec => {
             return Err(
-                invalid_data("schema version already exists with a different definition").into(),
+                invalid_data(&schema_definition_conflict_message(existing, schema_spec)).into(),
             );
         }
         Some(_) => {

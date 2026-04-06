@@ -4,6 +4,26 @@ use rustquet::{actors, config, routes, schema, storage, uploader};
 use tokio::sync::mpsc;
 use tracing::info;
 
+struct UserFacingError(String);
+
+impl std::fmt::Display for UserFacingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Debug for UserFacingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UserFacingError {}
+
+fn user_facing_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(UserFacingError(message.into()))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -18,7 +38,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded_config = schema::load_config_from_path(&runtime.schema_config_path)?;
     let active_schema = loaded_config.schema.clone();
     let db = storage::open_db(&runtime.db_path)?;
-    let schemas = Arc::new(storage::ensure_schema(&db, &active_schema)?);
+    let schemas = Arc::new(
+        storage::ensure_schema(&db, &active_schema).map_err(|error| {
+            user_facing_error(format!(
+                "failed to validate schema from '{}' against RocksDB at '{}': {error}",
+                runtime.schema_config_path, runtime.db_path
+            ))
+        })?,
+    );
     let write_manifest = loaded_config.dataset.write_manifest;
     let push_targets = Arc::new(uploader::resolve_push_targets_from_env(
         &loaded_config.push,
