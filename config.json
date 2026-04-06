@@ -2,7 +2,21 @@
   "dataset": {
     "write_manifest": true
   },
-  "push": [],
+  "push": [
+    {
+      "name": "lake_primary",
+      "kind": "s3_compatible",
+      "env": {
+        "bucket": "PUSH_BUCKET",
+        "prefix": "PUSH_PREFIX",
+        "endpoint": "PUSH_ENDPOINT",
+        "region": "PUSH_REGION",
+        "access_key_id": "PUSH_ACCESS_KEY_ID",
+        "secret_access_key": "PUSH_SECRET_ACCESS_KEY",
+        "allow_http": "PUSH_ALLOW_HTTP"
+      }
+    }
+  ],
   "schema": {
     "schema_version": 1,
     "columns": [
