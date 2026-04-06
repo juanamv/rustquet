@@ -1,6 +1,8 @@
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use object_store::aws::AmazonS3Builder;
 #[cfg(test)]
@@ -27,6 +29,8 @@ pub struct PushTarget {
     endpoint: String,
     region: String,
     store: Arc<dyn ObjectStore>,
+    #[cfg(test)]
+    upload_counter: Arc<AtomicUsize>,
 }
 
 fn invalid_input(message: impl Into<String>) -> Error {
@@ -187,6 +191,8 @@ impl PushTarget {
             endpoint,
             region,
             store: Arc::new(store),
+            #[cfg(test)]
+            upload_counter: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -206,7 +212,13 @@ impl PushTarget {
             endpoint: "memory://mock".to_string(),
             region: "test-region-1".to_string(),
             store: Arc::new(InMemory::new()),
+            upload_counter: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn upload_count(&self) -> usize {
+        self.upload_counter.load(Ordering::Relaxed)
     }
 
     pub fn name(&self) -> &str {
@@ -266,6 +278,8 @@ impl PushTarget {
         let location = self.object_path(dataset_path);
         let payload = std::fs::read(local_path)?;
         let _ = runtime_handle.block_on(self.store.put(&location, payload.into()))?;
+        #[cfg(test)]
+        self.upload_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(self.object_uri(&location))
     }
