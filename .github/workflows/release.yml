@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-version:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+
+    outputs:
+      package_name: ${{ steps.meta.outputs.package_name }}
+      package_version: ${{ steps.meta.outputs.package_version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate tag against Cargo.toml
+        id: meta
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          package_name = cargo["package"]["name"]
+          package_version = cargo["package"]["version"]
+          release_tag = os.environ["GITHUB_REF_NAME"]
+          expected_tag = f"v{package_version}"
+
+          if release_tag != expected_tag:
+              raise SystemExit(
+                  f"tag {release_tag!r} does not match Cargo.toml package.version "
+                  f"{package_version!r}; expected {expected_tag!r}"
+              )
+
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"package_name={package_name}\n")
+              output.write(f"package_version={package_version}\n")
+              output.write(f"release_tag={release_tag}\n")
+          PY
+
+  build:
+    name: Package ${{ matrix.target }}
+    needs: validate-version
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust and target cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin rustquet
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ needs.validate-version.outputs.package_name }}
+          PACKAGE_VERSION: ${{ needs.validate-version.outputs.package_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          archive_base="${PACKAGE_NAME}-v${PACKAGE_VERSION}-${TARGET}"
+          staging_dir="$RUNNER_TEMP/$archive_base"
+          mkdir -p "$staging_dir"
+          cp "target/release/${PACKAGE_NAME}" "$staging_dir/"
+          cp README.MD example.env config.json "$staging_dir/"
+          tar -C "$RUNNER_TEMP" -czf "dist/${archive_base}.tar.gz" "$archive_base"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_NAME: ${{ needs.validate-version.outputs.package_name }}
+          PACKAGE_VERSION: ${{ needs.validate-version.outputs.package_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $archiveBase = "$env:PACKAGE_NAME-v$env:PACKAGE_VERSION-$env:TARGET"
+          $stagingDir = Join-Path $env:RUNNER_TEMP $archiveBase
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          Copy-Item "target/release/$env:PACKAGE_NAME.exe" $stagingDir
+          Copy-Item "README.MD", "example.env", "config.json" $stagingDir
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "$stagingDir/*" -DestinationPath "dist/$archiveBase.zip" -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.validate-version.outputs.package_name }}-v${{ needs.validate-version.outputs.package_version }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - validate-version
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ needs.validate-version.outputs.package_name }}-v${{ needs.validate-version.outputs.package_version }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-version.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes dist/*
+          fi
