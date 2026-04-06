@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::domain::models::TelemetryEvent;
 use crate::domain::schema::SchemaSpec;
 use crate::infra::storage::{self, ActiveBatch, ActiveBatchStatus};
+use crate::infra::uploader::PushTarget;
 
 // ── Command types ──────────────────────────────────────────────────
 
@@ -164,13 +165,25 @@ pub async fn run_ingest_actor(
 // writes the Parquet file if needed, and then atomically finalizes the
 // batch inside RocksDB.
 
-fn process_batch(
-    db: &DB,
-    ingest_tx: &mpsc::Sender<IngestCmd>,
-    output_dir: &str,
-    schemas: &BTreeMap<u32, SchemaSpec>,
-    batch: ActiveBatch,
-) {
+struct ParquetBatchContext<'a> {
+    ingest_tx: &'a mpsc::Sender<IngestCmd>,
+    output_dir: &'a str,
+    schemas: &'a BTreeMap<u32, SchemaSpec>,
+    write_manifest: bool,
+    runtime_handle: &'a tokio::runtime::Handle,
+    push_targets: &'a [PushTarget],
+}
+
+fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) {
+    let ParquetBatchContext {
+        ingest_tx,
+        output_dir,
+        schemas,
+        write_manifest,
+        runtime_handle,
+        push_targets,
+    } = context;
+
     let Some(schema_spec) = schemas.get(&batch.schema_version) else {
         eprintln!(
             "[parquet] missing schema version {} for batch {}",
@@ -222,9 +235,49 @@ fn process_batch(
         }
     }
 
-    if let Err(error) = crate::infra::manifest::write_manifest(output_dir, batch, &final_path) {
-        eprintln!("[parquet] failed to write manifest: {error}");
-        return;
+    let manifest_path = if write_manifest {
+        match crate::infra::manifest::write_manifest(output_dir, batch, &final_path) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                eprintln!("[parquet] failed to write manifest: {error}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    for push_target in push_targets {
+        match push_target.upload_batch_artifacts(
+            runtime_handle,
+            output_dir,
+            &final_path,
+            manifest_path.as_deref().map(std::path::Path::new),
+        ) {
+            Ok(uploaded) => {
+                if let Some(parquet_uri) = uploaded.parquet_uri {
+                    println!(
+                        "[parquet] push '{}' uploaded parquet -> {}",
+                        push_target.name(),
+                        parquet_uri
+                    );
+                }
+                if let Some(manifest_uri) = uploaded.manifest_uri {
+                    println!(
+                        "[parquet] push '{}' uploaded manifest -> {}",
+                        push_target.name(),
+                        manifest_uri
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "[parquet] push '{}' failed to upload batch artifacts: {error}",
+                    push_target.name()
+                );
+                return;
+            }
+        }
     }
 
     if let Err(error) = storage::mark_active_batch_written(db, batch) {
@@ -251,6 +304,8 @@ pub async fn run_parquet_actor(
     ingest_tx: mpsc::Sender<IngestCmd>,
     output_dir: String,
     schemas: Arc<BTreeMap<u32, SchemaSpec>>,
+    write_manifest: bool,
+    push_targets: Arc<Vec<PushTarget>>,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -259,9 +314,22 @@ pub async fn run_parquet_actor(
                 let ingest_tx_clone = ingest_tx.clone();
                 let dir = output_dir.clone();
                 let schemas_clone = schemas.clone();
+                let runtime_handle = tokio::runtime::Handle::current();
+                let push_targets_clone = push_targets.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    process_batch(&db_clone, &ingest_tx_clone, &dir, &schemas_clone, batch);
+                    process_batch(
+                        &db_clone,
+                        batch,
+                        ParquetBatchContext {
+                            ingest_tx: &ingest_tx_clone,
+                            output_dir: &dir,
+                            schemas: &schemas_clone,
+                            write_manifest,
+                            runtime_handle: &runtime_handle,
+                            push_targets: push_targets_clone.as_slice(),
+                        },
+                    );
                 });
             }
         }

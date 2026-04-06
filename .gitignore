@@ -3,4 +3,4 @@
 /tests
 /parquet_output
 tests.rs
-.env
+*.env

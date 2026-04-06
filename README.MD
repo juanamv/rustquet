@@ -24,6 +24,7 @@ Recibe eventos por HTTP, los persiste en RocksDB de forma inmediata y los convie
 - conversion a Parquet en `parquet_output/` cuando un batch alcanza su tamanho exacto
 - salida particionada por rango de fechas del batch
 - manifest JSON por batch en `manifests/`
+- flujo `push` opcional definido en `config.json` para buckets compatibles con S3
 - recuperacion automatica de batches pendientes tras reinicios
 - columnas indexadas configurables via `config.json`
 - versionado de schema con reglas append-only
@@ -64,7 +65,18 @@ BATCH_SIZE=10000
 INGEST_CHANNEL_CAPACITY=8192
 PARQUET_CHANNEL_CAPACITY=1
 SCHEMA_CONFIG_PATH=config.json
+
+# valores resueltos por un destino push definido en config.json
+LAKE_BUCKET=telemetry-bucket
+LAKE_PREFIX=rustquet/prod
+LAKE_ENDPOINT=http://127.0.0.1:9000
+LAKE_REGION=us-east-1
+LAKE_ACCESS_KEY_ID=...
+LAKE_SECRET_ACCESS_KEY=...
+LAKE_ALLOW_HTTP=true
 ```
+
+`rustquet` usa `object_store` para el upload remoto. Los valores concretos de bucket, endpoint, region y credenciales se leen desde variables de entorno cuyos nombres se declaran en `config.json`.
 
 Precedencia para el schema:
 
@@ -124,10 +136,11 @@ curl -X POST http://127.0.0.1:3000/ingest \
 
 ## Schema de configuracion
 
-El archivo `config.json` define dos secciones:
+El archivo `config.json` define tres secciones:
 
 - `schema`: version y columnas indexadas a extraer de `metadata`
 - `dataset`: descripcion del dataset generado por `rustquet`
+- `push`: lista ordenada de destinos remotos opcionales
 
 Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` produce. El particionado no se configura desde el archivo: el sistema lo decide internamente para mantener un layout consistente y robusto.
 
@@ -147,6 +160,21 @@ Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` pr
   "dataset": {
     "write_manifest": true
   },
+  "push": [
+    {
+      "name": "lake_primary",
+      "kind": "s3_compatible",
+      "env": {
+        "bucket": "LAKE_BUCKET",
+        "prefix": "LAKE_PREFIX",
+        "endpoint": "LAKE_ENDPOINT",
+        "region": "LAKE_REGION",
+        "access_key_id": "LAKE_ACCESS_KEY_ID",
+        "secret_access_key": "LAKE_SECRET_ACCESS_KEY",
+        "allow_http": "LAKE_ALLOW_HTTP"
+      }
+    }
+  ],
   "schema": {
     "schema_version": 1,
     "columns": [
@@ -167,12 +195,34 @@ Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` pr
 
 | Campo | Requisito | Descripcion |
 |-------|-----------|-------------|
-| `dataset.write_manifest` | obligatorio | indica si el dataset expone manifests por batch; `true` |
+| `dataset.write_manifest` | obligatorio | indica si `rustquet` genera manifests por batch |
+| `push` | opcional | lista ordenada de destinos remotos |
+| `push[].name` | obligatorio | identificador unico y estable del destino |
+| `push[].kind` | obligatorio | hoy: `s3_compatible` |
+| `push[].artifacts` | opcional | `parquet`, `manifest` o ambos; si se omite, usa `parquet` y agrega `manifest` si `dataset.write_manifest=true` |
+| `push[].env.*` | obligatorio/segun campo | nombres de variables de entorno; no guarda secretos ni valores reales |
+| `push[].env.bucket` | obligatorio | variable que contiene el bucket |
+| `push[].env.prefix` | opcional | variable que contiene el prefijo remoto |
+| `push[].env.endpoint` | obligatorio | variable que contiene el endpoint S3-compatible |
+| `push[].env.region` | obligatorio | variable que contiene la region |
+| `push[].env.access_key_id` | obligatorio | variable que contiene el access key id |
+| `push[].env.secret_access_key` | obligatorio | variable que contiene el secret access key |
+| `push[].env.session_token` | opcional | variable que contiene un session token |
+| `push[].env.allow_http` | opcional | variable booleana `true` o `false` |
+| `push[].env.virtual_hosted_style` | opcional | variable booleana `true` o `false` |
 | `schema.schema_version` | obligatorio | numero entero, debe crecer con cada version |
 | `schema.columns` | obligatorio | lista de columnas indexadas |
 | `schema.columns[].name` | obligatorio | nombre de la columna en Parquet |
 | `schema.columns[].source` | obligatorio | ruta dentro de `metadata`, debe empezar con `metadata.` |
 | `schema.columns[].type` | obligatorio | `boolean`, `string` o `number` |
+
+**Validacion de `push`:**
+
+- `push[].name` debe ser unico
+- `push[].artifacts` no puede repetir valores
+- si `dataset.write_manifest=false`, no se permite subir `manifest`
+- cada `push[].env.*` debe apuntar a un nombre de variable no vacio
+- dentro de un mismo destino no se puede reutilizar la misma variable para campos distintos
 
 **Reglas de versionado:**
 
@@ -233,7 +283,7 @@ El servidor recupera el estado de RocksDB automaticamente:
 
 1. lee `next_event_id` y `next_batch_start_id`
 2. si existe un `active_batch`, verifica si el archivo `.parquet` final ya existe
-3. si el archivo `.parquet` existe y falta el manifest → regenera el manifest
+3. si el archivo `.parquet` existe y `dataset.write_manifest=true` y falta el manifest → regenera el manifest
 4. si el archivo `.parquet` existe → limpia el batch de RocksDB sin reescribir el Parquet
 5. si el archivo `.parquet` falta → regenera el batch desde RocksDB
 6. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
@@ -259,7 +309,7 @@ El nombre del archivo incluye:
 - `timestamp_min` del batch en UTC
 - `timestamp_max` del batch en UTC
 
-Manifests por batch:
+Si `dataset.write_manifest=true`, se genera un manifest por batch:
 
 ```
 manifests/
@@ -272,7 +322,7 @@ Cada manifest incluye:
 
 - `batch_id`
 - `schema_version`
-- `file_path`
+- `file_path` relativo al dataset, por ejemplo `parquet_output/date_start=.../batch_....parquet`
 - `row_count`
 - `event_id_min` y `event_id_max`
 - `timestamp_min` y `timestamp_max`
@@ -280,6 +330,8 @@ Cada manifest incluye:
 - `created_at`
 
 El servidor escribe primero a archivos `.tmp` y luego hace `rename` atomico para garantizar consistencia.
+
+Si `push` contiene destinos remotos, despues de escribir los archivos locales `rustquet` sube los artifacts configurados para cada destino antes de limpiar el batch en RocksDB. Las keys remotas reutilizan el mismo layout relativo del dataset y pueden quedar precedidas por el prefijo resuelto desde el entorno.
 
 ## Comandos
 

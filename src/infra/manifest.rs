@@ -26,7 +26,7 @@ fn invalid_data(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
 
-fn manifest_root(output_dir: &str) -> PathBuf {
+pub fn manifest_root(output_dir: &str) -> PathBuf {
     Path::new(output_dir)
         .parent()
         .map(|parent| parent.join("manifests"))
@@ -79,7 +79,7 @@ pub fn write_manifest(
     let entry = ManifestEntry {
         batch_id: batch.start_event_id,
         schema_version: batch.schema_version,
-        file_path: parquet_path.to_string_lossy().into_owned(),
+        file_path: layout::dataset_file_path(Path::new(output_dir), parquet_path)?,
         row_count: batch.len as u64,
         event_id_min: batch.start_event_id,
         event_id_max: batch.start_event_id + batch.len as u64 - 1,

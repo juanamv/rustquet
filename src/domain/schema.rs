@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
@@ -58,10 +59,65 @@ impl Default for DatasetSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushArtifact {
+    Parquet,
+    Manifest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushKind {
+    S3Compatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushEnvSpec {
+    pub bucket: String,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    pub endpoint: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    #[serde(default)]
+    pub session_token: Option<String>,
+    #[serde(default)]
+    pub allow_http: Option<String>,
+    #[serde(default)]
+    pub virtual_hosted_style: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSpec {
+    pub name: String,
+    pub kind: PushKind,
+    #[serde(default)]
+    pub artifacts: Option<Vec<PushArtifact>>,
+    pub env: PushEnvSpec,
+}
+
+impl PushSpec {
+    pub fn effective_artifacts(&self, write_manifest: bool) -> Vec<PushArtifact> {
+        match &self.artifacts {
+            Some(artifacts) => artifacts.clone(),
+            None => {
+                let mut artifacts = vec![PushArtifact::Parquet];
+                if write_manifest {
+                    artifacts.push(PushArtifact::Manifest);
+                }
+                artifacts
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigSpec {
     pub schema: SchemaSpec,
     pub dataset: DatasetSpec,
+    pub push: Vec<PushSpec>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +125,8 @@ struct ConfigFile {
     schema: SchemaFile,
     #[serde(default)]
     dataset: DatasetSpec,
+    #[serde(default)]
+    push: Vec<PushSpec>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +145,174 @@ struct SchemaFileColumn {
 
 fn invalid_data(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
+}
+
+fn validate_non_empty_field(
+    value: &str,
+    field_name: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_data(&format!("{field_name} cannot be empty")).into());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn validate_optional_non_empty_field(
+    value: Option<String>,
+    field_name: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    value
+        .map(|value| validate_non_empty_field(&value, field_name))
+        .transpose()
+}
+
+fn register_push_env_name(
+    names: &mut BTreeSet<String>,
+    push_name: &str,
+    field_name: &str,
+    env_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if names.insert(env_name.to_string()) {
+        return Ok(());
+    }
+
+    Err(invalid_data(&format!(
+        "push '{push_name}' reuses env var '{env_name}' for multiple fields, including {field_name}"
+    ))
+    .into())
+}
+
+fn validate_push_spec(
+    push: PushSpec,
+    write_manifest: bool,
+    names: &mut BTreeSet<String>,
+) -> Result<PushSpec, Box<dyn std::error::Error + Send + Sync>> {
+    let name = validate_non_empty_field(&push.name, "push.name")?;
+    if !names.insert(name.clone()) {
+        return Err(invalid_data(&format!("duplicate push name: {name}")).into());
+    }
+
+    let artifacts = if let Some(artifacts) = push.artifacts {
+        if artifacts.is_empty() {
+            return Err(invalid_data(&format!(
+                "push '{name}' artifacts cannot be empty when provided"
+            ))
+            .into());
+        }
+
+        let mut seen_artifacts = BTreeSet::new();
+        for artifact in &artifacts {
+            if !seen_artifacts.insert(*artifact) {
+                return Err(invalid_data(&format!(
+                    "push '{name}' contains duplicate artifact '{artifact:?}'"
+                ))
+                .into());
+            }
+        }
+
+        if !write_manifest && artifacts.contains(&PushArtifact::Manifest) {
+            return Err(invalid_data(&format!(
+                "push '{name}' cannot upload manifests when dataset.write_manifest is false"
+            ))
+            .into());
+        }
+
+        Some(artifacts)
+    } else {
+        None
+    };
+
+    let mut seen_env_names = BTreeSet::new();
+    let bucket = validate_non_empty_field(&push.env.bucket, &format!("push '{name}' env.bucket"))?;
+    register_push_env_name(&mut seen_env_names, &name, "env.bucket", &bucket)?;
+
+    let endpoint =
+        validate_non_empty_field(&push.env.endpoint, &format!("push '{name}' env.endpoint"))?;
+    register_push_env_name(&mut seen_env_names, &name, "env.endpoint", &endpoint)?;
+
+    let region = validate_non_empty_field(&push.env.region, &format!("push '{name}' env.region"))?;
+    register_push_env_name(&mut seen_env_names, &name, "env.region", &region)?;
+
+    let access_key_id = validate_non_empty_field(
+        &push.env.access_key_id,
+        &format!("push '{name}' env.access_key_id"),
+    )?;
+    register_push_env_name(
+        &mut seen_env_names,
+        &name,
+        "env.access_key_id",
+        &access_key_id,
+    )?;
+
+    let secret_access_key = validate_non_empty_field(
+        &push.env.secret_access_key,
+        &format!("push '{name}' env.secret_access_key"),
+    )?;
+    register_push_env_name(
+        &mut seen_env_names,
+        &name,
+        "env.secret_access_key",
+        &secret_access_key,
+    )?;
+
+    let prefix =
+        validate_optional_non_empty_field(push.env.prefix, &format!("push '{name}' env.prefix"))?;
+    if let Some(prefix) = &prefix {
+        register_push_env_name(&mut seen_env_names, &name, "env.prefix", prefix)?;
+    }
+
+    let session_token = validate_optional_non_empty_field(
+        push.env.session_token,
+        &format!("push '{name}' env.session_token"),
+    )?;
+    if let Some(session_token) = &session_token {
+        register_push_env_name(
+            &mut seen_env_names,
+            &name,
+            "env.session_token",
+            session_token,
+        )?;
+    }
+
+    let allow_http = validate_optional_non_empty_field(
+        push.env.allow_http,
+        &format!("push '{name}' env.allow_http"),
+    )?;
+    if let Some(allow_http) = &allow_http {
+        register_push_env_name(&mut seen_env_names, &name, "env.allow_http", allow_http)?;
+    }
+
+    let virtual_hosted_style = validate_optional_non_empty_field(
+        push.env.virtual_hosted_style,
+        &format!("push '{name}' env.virtual_hosted_style"),
+    )?;
+    if let Some(virtual_hosted_style) = &virtual_hosted_style {
+        register_push_env_name(
+            &mut seen_env_names,
+            &name,
+            "env.virtual_hosted_style",
+            virtual_hosted_style,
+        )?;
+    }
+
+    Ok(PushSpec {
+        name,
+        kind: push.kind,
+        artifacts,
+        env: PushEnvSpec {
+            bucket,
+            prefix,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            allow_http,
+            virtual_hosted_style,
+        },
+    })
 }
 
 fn parse_source_path(
@@ -119,6 +345,7 @@ pub fn load_config_from_path(
 ) -> Result<ConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
     let raw = fs::read_to_string(path)?;
     let file: ConfigFile = serde_json::from_str(&raw)?;
+    let mut push_names = BTreeSet::new();
 
     Ok(ConfigSpec {
         schema: SchemaSpec {
@@ -136,6 +363,11 @@ pub fn load_config_from_path(
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?,
         },
+        push: file
+            .push
+            .into_iter()
+            .map(|push| validate_push_spec(push, file.dataset.write_manifest, &mut push_names))
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?,
         dataset: file.dataset,
     })
 }

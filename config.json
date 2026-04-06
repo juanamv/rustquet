@@ -2,6 +2,7 @@
   "dataset": {
     "write_manifest": true
   },
+  "push": [],
   "schema": {
     "schema_version": 1,
     "columns": [

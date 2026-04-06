@@ -1,3 +1,4 @@
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -37,6 +38,10 @@ fn utc_components(timestamp: i64) -> (i32, u32, u32, u32, u32, u32) {
     (year as i32, month as u32, day as u32, hour, minute, second)
 }
 
+fn invalid_input(message: &str) -> Error {
+    Error::new(ErrorKind::InvalidInput, message)
+}
+
 pub fn format_date(timestamp: i64) -> String {
     let (year, month, day, _, _, _) = utc_components(timestamp);
     format!("{year:04}-{month:02}-{day:02}")
@@ -64,6 +69,32 @@ pub fn batch_file_name(
         format_compact_timestamp(timestamp_max),
         extension
     )
+}
+
+pub fn dataset_file_path(
+    root: &Path,
+    path: &Path,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let root_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid_input("dataset root path must have a final component"))?;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| invalid_input("file path is outside the dataset root"))?;
+
+    if relative.as_os_str().is_empty() {
+        return Ok(root_name);
+    }
+
+    let relative_path = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Ok(format!("{root_name}/{relative_path}"))
 }
 
 pub fn find_batch_file(root: &Path, batch_start_id: u64, extension: &str) -> Option<PathBuf> {
