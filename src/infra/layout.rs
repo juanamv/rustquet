@@ -42,8 +42,13 @@ fn invalid_input(message: &str) -> Error {
     Error::new(ErrorKind::InvalidInput, message)
 }
 
-pub fn format_date(timestamp: i64) -> String {
+pub fn format_date_parts(timestamp: i64) -> (i32, u32, u32) {
     let (year, month, day, _, _, _) = utc_components(timestamp);
+    (year, month, day)
+}
+
+pub fn format_date(timestamp: i64) -> String {
+    let (year, month, day) = format_date_parts(timestamp);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
@@ -52,7 +57,14 @@ pub fn format_compact_timestamp(timestamp: i64) -> String {
     format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
 }
 
-pub fn partition_directory(root: &Path, timestamp_min: i64, timestamp_max: i64) -> PathBuf {
+pub fn day_partition_directory(root: &Path, timestamp: i64) -> PathBuf {
+    let (year, month, day) = format_date_parts(timestamp);
+    root.join(format!("year={year:04}"))
+        .join(format!("month={month:02}"))
+        .join(format!("day={day:02}"))
+}
+
+pub fn range_partition_directory(root: &Path, timestamp_min: i64, timestamp_max: i64) -> PathBuf {
     root.join(format!("date_start={}", format_date(timestamp_min)))
         .join(format!("date_end={}", format_date(timestamp_max)))
 }
@@ -97,18 +109,50 @@ pub fn dataset_file_path(
     Ok(format!("{root_name}/{relative_path}"))
 }
 
-pub fn find_batch_file(root: &Path, batch_start_id: u64, extension: &str) -> Option<PathBuf> {
+pub fn local_path_from_dataset_path(
+    root: &Path,
+    dataset_path: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let root_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid_input("dataset root path must have a final component"))?;
+    let dataset_path = dataset_path.trim().replace('\\', "/");
+
+    if dataset_path == root_name {
+        return Ok(root.to_path_buf());
+    }
+
+    let prefix = format!("{root_name}/");
+    let relative = dataset_path
+        .strip_prefix(&prefix)
+        .ok_or_else(|| invalid_input("dataset path is outside the dataset root"))?;
+
+    let path = relative
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .fold(root.to_path_buf(), |path, segment| path.join(segment));
+
+    Ok(path)
+}
+
+pub fn find_batch_files(root: &Path, batch_start_id: u64, extension: &str) -> Vec<PathBuf> {
     if !root.exists() {
-        return None;
+        return Vec::new();
     }
 
     let exact_name = format!("batch_{batch_start_id:010}.{extension}");
     let prefixed_name = format!("batch_{batch_start_id:010}_");
     let expected_suffix = format!(".{extension}");
+    let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
 
     while let Some(dir) = pending.pop() {
-        let entries = std::fs::read_dir(&dir).ok()?;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
             if path.is_dir() {
@@ -123,10 +167,17 @@ pub fn find_batch_file(root: &Path, batch_start_id: u64, extension: &str) -> Opt
             if file_name == exact_name
                 || (file_name.starts_with(&prefixed_name) && file_name.ends_with(&expected_suffix))
             {
-                return Some(path);
+                files.push(path);
             }
         }
     }
 
-    None
+    files.sort();
+    files
+}
+
+pub fn find_batch_file(root: &Path, batch_start_id: u64, extension: &str) -> Option<PathBuf> {
+    find_batch_files(root, batch_start_id, extension)
+        .into_iter()
+        .next()
 }

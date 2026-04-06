@@ -8,11 +8,11 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
 
 use crate::domain::schema::{PushArtifact, PushKind, PushSpec};
-use crate::infra::{layout, manifest};
+use crate::infra::{layout, manifest, parquet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UploadedBatchArtifacts {
-    pub parquet_uri: Option<String>,
+    pub parquet_uris: Vec<String>,
     pub manifest_uri: Option<String>,
 }
 
@@ -253,15 +253,21 @@ impl PushTarget {
         &self,
         runtime_handle: &Handle,
         output_dir: &str,
-        parquet_path: &Path,
+        parquet_files: &[parquet::ParquetDataFile],
         manifest_path: Option<&Path>,
     ) -> Result<UploadedBatchArtifacts, Box<dyn std::error::Error + Send + Sync>> {
-        let parquet_uri = if self.uploads_parquet() {
-            let parquet_dataset_path =
-                layout::dataset_file_path(Path::new(output_dir), parquet_path)?;
-            Some(self.upload_local_file(runtime_handle, parquet_path, &parquet_dataset_path)?)
+        let parquet_uris = if self.uploads_parquet() {
+            parquet_files
+                .iter()
+                .map(|file| {
+                    let parquet_path = Path::new(&file.path);
+                    let parquet_dataset_path =
+                        layout::dataset_file_path(Path::new(output_dir), parquet_path)?;
+                    self.upload_local_file(runtime_handle, parquet_path, &parquet_dataset_path)
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?
         } else {
-            None
+            Vec::new()
         };
 
         let manifest_uri = if self.uploads_manifest() {
@@ -279,7 +285,7 @@ impl PushTarget {
         };
 
         Ok(UploadedBatchArtifacts {
-            parquet_uri,
+            parquet_uris,
             manifest_uri,
         })
     }

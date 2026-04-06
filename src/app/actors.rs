@@ -174,6 +174,20 @@ struct ParquetBatchContext<'a> {
     push_targets: &'a [PushTarget],
 }
 
+fn finalize_batch(db: &DB, ingest_tx: &mpsc::Sender<IngestCmd>, batch: ActiveBatch) {
+    let next_batch_start_id = match storage::finalize_active_batch(db, batch) {
+        Ok(next_batch_start_id) => next_batch_start_id,
+        Err(error) => {
+            eprintln!("[parquet] failed to finalize batch: {error}");
+            return;
+        }
+    };
+
+    let _ = ingest_tx.blocking_send(IngestCmd::BatchDone {
+        next_batch_start_id,
+    });
+}
+
 fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) {
     let ParquetBatchContext {
         ingest_tx,
@@ -191,52 +205,77 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
         );
         return;
     };
-
-    let expected_final_path = crate::infra::parquet::parquet_file_path_for_batch(output_dir, batch);
-    let mut final_path = if expected_final_path.exists() {
-        expected_final_path
-    } else {
-        crate::infra::parquet::parquet_file_path(output_dir, batch.start_event_id)
-    };
-
-    if !final_path.exists() {
-        let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
-            Ok(events) => events,
+    let manifest_lookup_path = write_manifest
+        .then(|| crate::infra::manifest::manifest_file_path(output_dir, batch.start_event_id));
+    let existing_manifest = manifest_lookup_path
+        .as_ref()
+        .filter(|path| path.exists())
+        .and_then(|path| match crate::infra::manifest::load_manifest(path) {
+            Ok(manifest) => Some(manifest),
             Err(error) => {
-                eprintln!("[parquet] failed to read batch from rocksdb: {error}");
-                return;
+                eprintln!(
+                    "[parquet] ignoring invalid manifest for batch {}: {error}",
+                    batch.start_event_id
+                );
+                let _ = std::fs::remove_file(path);
+                None
             }
-        };
+        });
 
-        if events.len() != batch.len {
-            eprintln!(
-                "[parquet] expected {} events for batch {}, got {}",
-                batch.len,
-                batch.start_event_id,
-                events.len()
-            );
-            return;
-        }
-
-        match crate::infra::parquet::write_parquet_batch_with_schema(
-            &events,
-            batch,
-            output_dir,
-            schema_spec,
-        ) {
-            Ok((file, count)) => {
-                final_path = std::path::PathBuf::from(&file);
-                println!("[parquet] wrote {count} events -> {file}");
-            }
-            Err(error) => {
-                eprintln!("[parquet] failed to write file: {error}");
-                return;
-            }
-        }
+    if batch.status == ActiveBatchStatus::Written
+        && existing_manifest.as_ref().is_some_and(|manifest| {
+            crate::infra::manifest::manifest_files_exist(output_dir, manifest)
+        })
+    {
+        finalize_batch(db, ingest_tx, batch);
+        return;
     }
 
+    let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("[parquet] failed to read batch from rocksdb: {error}");
+            return;
+        }
+    };
+
+    if events.len() != batch.len {
+        eprintln!(
+            "[parquet] expected {} events for batch {}, got {}",
+            batch.len,
+            batch.start_event_id,
+            events.len()
+        );
+        return;
+    }
+
+    let write_result = match crate::infra::parquet::write_parquet_batch_with_schema(
+        &events,
+        batch,
+        output_dir,
+        schema_spec,
+    ) {
+        Ok(result) => {
+            let file_list = result
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "[parquet] wrote {} events -> {}",
+                result.row_count, file_list
+            );
+            result
+        }
+        Err(error) => {
+            eprintln!("[parquet] failed to write files: {error}");
+            return;
+        }
+    };
+
     let manifest_path = if write_manifest {
-        match crate::infra::manifest::write_manifest(output_dir, batch, &final_path) {
+        match crate::infra::manifest::write_manifest(output_dir, batch, &write_result.files) {
             Ok(path) => Some(path),
             Err(error) => {
                 eprintln!("[parquet] failed to write manifest: {error}");
@@ -247,55 +286,47 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
         None
     };
 
-    for push_target in push_targets {
-        match push_target.upload_batch_artifacts(
-            runtime_handle,
-            output_dir,
-            &final_path,
-            manifest_path.as_deref().map(std::path::Path::new),
-        ) {
-            Ok(uploaded) => {
-                if let Some(parquet_uri) = uploaded.parquet_uri {
-                    println!(
-                        "[parquet] push '{}' uploaded parquet -> {}",
-                        push_target.name(),
-                        parquet_uri
-                    );
+    if batch.status != ActiveBatchStatus::Written {
+        for push_target in push_targets {
+            match push_target.upload_batch_artifacts(
+                runtime_handle,
+                output_dir,
+                &write_result.files,
+                manifest_path.as_deref().map(std::path::Path::new),
+            ) {
+                Ok(uploaded) => {
+                    for parquet_uri in uploaded.parquet_uris {
+                        println!(
+                            "[parquet] push '{}' uploaded parquet -> {}",
+                            push_target.name(),
+                            parquet_uri
+                        );
+                    }
+                    if let Some(manifest_uri) = uploaded.manifest_uri {
+                        println!(
+                            "[parquet] push '{}' uploaded manifest -> {}",
+                            push_target.name(),
+                            manifest_uri
+                        );
+                    }
                 }
-                if let Some(manifest_uri) = uploaded.manifest_uri {
-                    println!(
-                        "[parquet] push '{}' uploaded manifest -> {}",
-                        push_target.name(),
-                        manifest_uri
+                Err(error) => {
+                    eprintln!(
+                        "[parquet] push '{}' failed to upload batch artifacts: {error}",
+                        push_target.name()
                     );
+                    return;
                 }
-            }
-            Err(error) => {
-                eprintln!(
-                    "[parquet] push '{}' failed to upload batch artifacts: {error}",
-                    push_target.name()
-                );
-                return;
             }
         }
-    }
 
-    if let Err(error) = storage::mark_active_batch_written(db, batch) {
-        eprintln!("[parquet] failed to mark batch as written: {error}");
-        return;
-    }
-
-    let next_batch_start_id = match storage::finalize_active_batch(db, batch) {
-        Ok(next_batch_start_id) => next_batch_start_id,
-        Err(error) => {
-            eprintln!("[parquet] failed to finalize batch: {error}");
+        if let Err(error) = storage::mark_active_batch_written(db, batch) {
+            eprintln!("[parquet] failed to mark batch as written: {error}");
             return;
         }
-    };
+    }
 
-    let _ = ingest_tx.blocking_send(IngestCmd::BatchDone {
-        next_batch_start_id,
-    });
+    finalize_batch(db, ingest_tx, batch);
 }
 
 pub async fn run_parquet_actor(

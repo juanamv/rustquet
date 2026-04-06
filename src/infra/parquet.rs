@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
@@ -16,6 +17,28 @@ use crate::domain::models::TelemetryEvent;
 use crate::domain::schema::{self, ColumnType, SchemaSpec};
 use crate::infra::layout;
 use crate::infra::storage::ActiveBatch;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParquetDataFile {
+    pub path: String,
+    pub row_count: usize,
+    pub timestamp_min: i64,
+    pub timestamp_max: i64,
+    pub partition_date: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchParquetWriteResult {
+    pub files: Vec<ParquetDataFile>,
+    pub row_count: usize,
+}
+
+struct PartitionedEvents<'a> {
+    partition_date: String,
+    timestamp_min: i64,
+    timestamp_max: i64,
+    events: Vec<&'a TelemetryEvent>,
+}
 
 enum IndexedBuilder {
     Bool(BooleanBuilder),
@@ -96,23 +119,21 @@ fn event_timestamp_range(
 }
 
 pub fn parquet_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
-    layout::find_batch_file(Path::new(output_dir), batch_start_id, "parquet").unwrap_or_else(|| {
-        PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
-    })
+    parquet_file_paths(output_dir, batch_start_id)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
+        })
 }
 
 pub fn parquet_file_path_for_batch(output_dir: &str, batch: ActiveBatch) -> PathBuf {
-    layout::partition_directory(
-        Path::new(output_dir),
-        batch.timestamp_min,
-        batch.timestamp_max,
-    )
-    .join(layout::batch_file_name(
+    parquet_file_path_for_range(
+        output_dir,
         batch.start_event_id,
         batch.timestamp_min,
         batch.timestamp_max,
-        "parquet",
-    ))
+    )
 }
 
 pub fn parquet_temp_file_path_for_batch(output_dir: &str, batch: ActiveBatch) -> PathBuf {
@@ -120,11 +141,36 @@ pub fn parquet_temp_file_path_for_batch(output_dir: &str, batch: ActiveBatch) ->
     final_path.with_extension("parquet.tmp")
 }
 
+pub fn parquet_file_paths(output_dir: &str, batch_start_id: u64) -> Vec<PathBuf> {
+    layout::find_batch_files(Path::new(output_dir), batch_start_id, "parquet")
+}
+
+fn parquet_file_path_for_range(
+    output_dir: &str,
+    batch_start_id: u64,
+    timestamp_min: i64,
+    timestamp_max: i64,
+) -> PathBuf {
+    layout::day_partition_directory(Path::new(output_dir), timestamp_min).join(
+        layout::batch_file_name(batch_start_id, timestamp_min, timestamp_max, "parquet"),
+    )
+}
+
+fn parquet_temp_file_path_for_range(
+    output_dir: &str,
+    batch_start_id: u64,
+    timestamp_min: i64,
+    timestamp_max: i64,
+) -> PathBuf {
+    parquet_file_path_for_range(output_dir, batch_start_id, timestamp_min, timestamp_max)
+        .with_extension("parquet.tmp")
+}
+
 pub fn write_parquet(
     events: &[TelemetryEvent],
     batch_start_id: u64,
     output_dir: &str,
-) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BatchParquetWriteResult, Box<dyn std::error::Error + Send + Sync>> {
     let schema_spec = schema::load_default_schema()?;
     write_parquet_with_schema(events, batch_start_id, output_dir, &schema_spec)
 }
@@ -134,16 +180,8 @@ pub fn write_parquet_with_schema(
     batch_start_id: u64,
     output_dir: &str,
     schema_spec: &SchemaSpec,
-) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    let (timestamp_min, timestamp_max) = event_timestamp_range(events)?;
-    write_parquet_with_layout(
-        events,
-        batch_start_id,
-        timestamp_min,
-        timestamp_max,
-        output_dir,
-        schema_spec,
-    )
+) -> Result<BatchParquetWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+    write_parquet_partitions(events, batch_start_id, output_dir, schema_spec)
 }
 
 pub fn write_parquet_batch_with_schema(
@@ -151,49 +189,60 @@ pub fn write_parquet_batch_with_schema(
     batch: ActiveBatch,
     output_dir: &str,
     schema_spec: &SchemaSpec,
-) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BatchParquetWriteResult, Box<dyn std::error::Error + Send + Sync>> {
     if events.len() != batch.len {
         return Err(invalid_data("batch metadata does not match parquet row count").into());
     }
 
-    write_parquet_with_layout(
-        events,
-        batch.start_event_id,
-        batch.timestamp_min,
-        batch.timestamp_max,
-        output_dir,
-        schema_spec,
-    )
-}
-
-fn write_parquet_with_layout(
-    events: &[TelemetryEvent],
-    batch_start_id: u64,
-    timestamp_min: i64,
-    timestamp_max: i64,
-    output_dir: &str,
-    schema_spec: &SchemaSpec,
-) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    let partition_dir =
-        layout::partition_directory(Path::new(output_dir), timestamp_min, timestamp_max);
-    std::fs::create_dir_all(&partition_dir)?;
-
-    let batch = ActiveBatch {
-        start_event_id: batch_start_id,
-        len: events.len(),
-        status: crate::infra::storage::ActiveBatchStatus::Writing,
-        schema_version: schema_spec.version,
-        timestamp_min,
-        timestamp_max,
-    };
-    let final_path = parquet_file_path_for_batch(output_dir, batch);
-    if final_path.exists() {
-        return Ok((final_path.to_string_lossy().into_owned(), events.len()));
+    let (timestamp_min, timestamp_max) = event_timestamp_range(events)?;
+    if (timestamp_min, timestamp_max) != (batch.timestamp_min, batch.timestamp_max) {
+        return Err(invalid_data("batch timestamp range does not match parquet events").into());
     }
 
-    let temp_path = parquet_temp_file_path_for_batch(output_dir, batch);
+    write_parquet_partitions(events, batch.start_event_id, output_dir, schema_spec)
+}
+
+fn partition_events_by_day<'a>(
+    events: &'a [TelemetryEvent],
+) -> Result<Vec<PartitionedEvents<'a>>, Box<dyn std::error::Error + Send + Sync>> {
+    if events.is_empty() {
+        return Err(invalid_data("cannot write parquet for an empty batch").into());
+    }
+
+    let mut partitions: BTreeMap<String, PartitionedEvents<'a>> = BTreeMap::new();
+    for event in events {
+        let partition_date = layout::format_date(event.timestamp);
+        let partition =
+            partitions
+                .entry(partition_date.clone())
+                .or_insert_with(|| PartitionedEvents {
+                    partition_date,
+                    timestamp_min: event.timestamp,
+                    timestamp_max: event.timestamp,
+                    events: Vec::new(),
+                });
+        partition.timestamp_min = partition.timestamp_min.min(event.timestamp);
+        partition.timestamp_max = partition.timestamp_max.max(event.timestamp);
+        partition.events.push(event);
+    }
+
+    Ok(partitions.into_values().collect())
+}
+
+fn write_single_parquet_file(
+    events: &[&TelemetryEvent],
+    final_path: &Path,
+    temp_path: &Path,
+    schema_spec: &SchemaSpec,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = final_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if final_path.exists() {
+        return Ok(());
+    }
     if temp_path.exists() {
-        std::fs::remove_file(&temp_path)?;
+        std::fs::remove_file(temp_path)?;
     }
 
     let mut indexed_builders: Vec<_> = schema_spec
@@ -255,8 +304,48 @@ fn write_parquet_with_layout(
         writer.close()?;
     }
 
-    std::fs::write(&temp_path, &buffer)?;
-    std::fs::rename(&temp_path, &final_path)?;
+    std::fs::write(temp_path, &buffer)?;
+    std::fs::rename(temp_path, final_path)?;
 
-    Ok((final_path.to_string_lossy().into_owned(), events.len()))
+    Ok(())
+}
+
+fn write_parquet_partitions(
+    events: &[TelemetryEvent],
+    batch_start_id: u64,
+    output_dir: &str,
+    schema_spec: &SchemaSpec,
+) -> Result<BatchParquetWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+    let partitions = partition_events_by_day(events)?;
+    let mut files = Vec::with_capacity(partitions.len());
+
+    for partition in partitions {
+        let final_path = parquet_file_path_for_range(
+            output_dir,
+            batch_start_id,
+            partition.timestamp_min,
+            partition.timestamp_max,
+        );
+        let temp_path = parquet_temp_file_path_for_range(
+            output_dir,
+            batch_start_id,
+            partition.timestamp_min,
+            partition.timestamp_max,
+        );
+
+        write_single_parquet_file(&partition.events, &final_path, &temp_path, schema_spec)?;
+
+        files.push(ParquetDataFile {
+            path: final_path.to_string_lossy().into_owned(),
+            row_count: partition.events.len(),
+            timestamp_min: partition.timestamp_min,
+            timestamp_max: partition.timestamp_max,
+            partition_date: partition.partition_date,
+        });
+    }
+
+    Ok(BatchParquetWriteResult {
+        row_count: events.len(),
+        files,
+    })
 }

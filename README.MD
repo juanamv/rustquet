@@ -239,8 +239,9 @@ Por ahora, `dataset` describe propiedades estables del dataset que `rustquet` pr
 **Particionado del dataset:**
 
 - no se define en `config.json`
-- `rustquet` lo resuelve internamente a partir del rango temporal del batch
-- hoy los archivos se organizan por `date_start` y `date_end`
+- `rustquet` lo resuelve internamente a partir del `timestamp` de cada evento
+- los archivos se organizan automaticamente con layout canonico tipo Hive: `year=YYYY/month=MM/day=DD`
+- si un batch cruza medianoche, `rustquet` escribe varios archivos, uno por dia, sin romper el batch logico por cantidad
 
 ## Columnas Parquet
 
@@ -282,10 +283,10 @@ El sistema mantiene consistencia entre batches durante actualizaciones de schema
 El servidor recupera el estado de RocksDB automaticamente:
 
 1. lee `next_event_id` y `next_batch_start_id`
-2. si existe un `active_batch`, verifica si el archivo `.parquet` final ya existe
-3. si el archivo `.parquet` existe y `dataset.write_manifest=true` y falta el manifest → regenera el manifest
-4. si el archivo `.parquet` existe → limpia el batch de RocksDB sin reescribir el Parquet
-5. si el archivo `.parquet` falta → regenera el batch desde RocksDB
+2. si existe un `active_batch`, verifica si los archivos `.parquet` esperados del batch ya existen
+3. si los archivos existen y `dataset.write_manifest=true` y falta el manifest → regenera el manifest
+4. si los archivos existen → limpia el batch de RocksDB sin reescribir Parquet
+5. si falta alguno de los archivos → regenera el batch desde RocksDB
 6. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
 
 No se requiere intervencion manual.
@@ -294,20 +295,25 @@ No se requiere intervencion manual.
 
 Ubicacion principal: `parquet_output/`
 
-Particionado por rango de fechas del batch:
+Particionado automatico por fecha del evento:
 
 ```text
 parquet_output/
-  date_start=2026-04-05/
-    date_end=2026-04-05/
-      batch_0000000001_20260405T140000Z_20260405T140459Z.parquet
+  year=2026/
+    month=04/
+      day=05/
+        batch_0000000001_20260405T140000Z_20260405T140459Z.parquet
+      day=06/
+        batch_0000000001_20260406T000000Z_20260406T000500Z.parquet
 ```
 
 El nombre del archivo incluye:
 
 - `batch_id` deterministico (`start_event_id`)
-- `timestamp_min` del batch en UTC
-- `timestamp_max` del batch en UTC
+- `timestamp_min` del archivo en UTC
+- `timestamp_max` del archivo en UTC
+
+Un batch puede generar uno o varios archivos Parquet. Si todos los eventos caen en el mismo dia, genera un solo archivo. Si el batch cruza de dia, el writer divide la salida fisica por dia y mantiene el mismo `batch_id` en todos los archivos generados.
 
 Si `dataset.write_manifest=true`, se genera un manifest por batch:
 
@@ -322,7 +328,8 @@ Cada manifest incluye:
 
 - `batch_id`
 - `schema_version`
-- `file_path` relativo al dataset, por ejemplo `parquet_output/date_start=.../batch_....parquet`
+- `files`: lista de archivos Parquet del batch
+- cada entrada de `files` incluye `file_path`, `row_count`, `timestamp_min`, `timestamp_max` y `date`
 - `row_count`
 - `event_id_min` y `event_id_max`
 - `timestamp_min` y `timestamp_max`

@@ -4,14 +4,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::layout;
 use crate::infra::storage::ActiveBatch;
+use crate::infra::{layout, parquet};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestDataFile {
+    pub file_path: String,
+    pub row_count: u64,
+    pub timestamp_min: i64,
+    pub timestamp_max: i64,
+    pub date: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub batch_id: u64,
     pub schema_version: u32,
-    pub file_path: String,
+    pub files: Vec<ManifestDataFile>,
     pub row_count: u64,
     pub event_id_min: u64,
     pub event_id_max: u64,
@@ -34,7 +43,7 @@ pub fn manifest_root(output_dir: &str) -> PathBuf {
 }
 
 pub fn manifest_file_path_for_batch(output_dir: &str, batch: ActiveBatch) -> PathBuf {
-    layout::partition_directory(
+    layout::range_partition_directory(
         &manifest_root(output_dir),
         batch.timestamp_min,
         batch.timestamp_max,
@@ -56,10 +65,13 @@ pub fn manifest_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
 pub fn write_manifest(
     output_dir: &str,
     batch: ActiveBatch,
-    parquet_path: &Path,
+    parquet_files: &[parquet::ParquetDataFile],
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if batch.len == 0 {
         return Err(invalid_data("cannot write manifest for an empty batch").into());
+    }
+    if parquet_files.is_empty() {
+        return Err(invalid_data("cannot write manifest without parquet files").into());
     }
 
     let final_path = manifest_file_path_for_batch(output_dir, batch);
@@ -76,10 +88,23 @@ pub fn write_manifest(
     }
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let files = parquet_files
+        .iter()
+        .map(|file| {
+            Ok(ManifestDataFile {
+                file_path: layout::dataset_file_path(Path::new(output_dir), Path::new(&file.path))?,
+                row_count: file.row_count as u64,
+                timestamp_min: file.timestamp_min,
+                timestamp_max: file.timestamp_max,
+                date: file.partition_date.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?;
+
     let entry = ManifestEntry {
         batch_id: batch.start_event_id,
         schema_version: batch.schema_version,
-        file_path: layout::dataset_file_path(Path::new(output_dir), parquet_path)?,
+        files,
         row_count: batch.len as u64,
         event_id_min: batch.start_event_id,
         event_id_max: batch.start_event_id + batch.len as u64 - 1,
@@ -100,4 +125,14 @@ pub fn load_manifest(
     path: &Path,
 ) -> Result<ManifestEntry, Box<dyn std::error::Error + Send + Sync>> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+pub fn manifest_files_exist(output_dir: &str, manifest: &ManifestEntry) -> bool {
+    let dataset_root = Path::new(output_dir);
+
+    manifest.files.iter().all(|file| {
+        layout::local_path_from_dataset_path(dataset_root, &file.file_path)
+            .ok()
+            .is_some_and(|path| path.exists())
+    })
 }
