@@ -99,7 +99,7 @@ pub fn write_parquet_with_schema(
         .map(|column| IndexedBuilder::new(column.kind))
         .collect();
     let mut fields = vec![
-        Field::new("session_id", DataType::Utf8, false),
+        Field::new("id", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
         Field::new("event_name", DataType::Utf8, false),
         Field::new("timestamp", DataType::Int64, false),
@@ -114,14 +114,14 @@ pub fn write_parquet_with_schema(
     );
     let schema = Arc::new(Schema::new(fields));
 
-    let mut session_builder = StringBuilder::new();
+    let mut id_builder = StringBuilder::new();
     let mut path_builder = StringBuilder::new();
     let mut event_name_builder = StringBuilder::new();
     let mut timestamp_builder = Int64Builder::new();
     let mut metadata_builder = StringBuilder::new();
 
     for event in events {
-        session_builder.append_value(&event.session_id);
+        id_builder.append_value(&event.id);
         path_builder.append_value(&event.path);
         event_name_builder.append_value(&event.event_name);
         timestamp_builder.append_value(event.timestamp);
@@ -132,7 +132,7 @@ pub fn write_parquet_with_schema(
     }
 
     let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(session_builder.finish()),
+        Arc::new(id_builder.finish()),
         Arc::new(path_builder.finish()),
         Arc::new(event_name_builder.finish()),
         Arc::new(timestamp_builder.finish()),

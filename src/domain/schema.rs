@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CONFIG_PATH: &str = "config.json";
 pub const DEFAULT_SCHEMA_VERSION: u32 = 1;
-pub const FIXED_COLUMNS: [&str; 5] = ["session_id", "path", "event_name", "timestamp", "metadata"];
+pub const FIXED_COLUMNS: [&str; 5] = ["id", "path", "event_name", "timestamp", "metadata"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

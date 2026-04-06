@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryEvent {
-    pub session_id: String,
+    pub id: String,
     pub path: String,
     pub event_name: String,
     #[serde(default = "default_metadata")]

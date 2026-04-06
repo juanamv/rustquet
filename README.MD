@@ -42,7 +42,7 @@ Ejemplo:
 
 ```json
 {
-  "session_id": "abc123",
+  "id": "abc123",
   "path": "/pagina/productos",
   "event_name": "click_boton",
   "metadata": {
@@ -59,7 +59,7 @@ Ejemplo con `curl`:
 curl -X POST http://127.0.0.1:3000/ingest \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "abc123",
+    "id": "abc123",
     "path": "/pagina/productos",
     "event_name": "click_boton",
     "metadata": {
@@ -113,7 +113,7 @@ Ejemplos incluidos en el repo:
 
 Cada archivo Parquet siempre incluye estas columnas fijas:
 
-- `session_id`
+- `id`
 - `path`
 - `event_name`
 - `timestamp`
