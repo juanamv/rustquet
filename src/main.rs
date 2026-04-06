@@ -93,7 +93,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("  server_addr={}", runtime.server_addr);
     info!("  db_path={}", runtime.db_path);
     info!("  parquet_output_dir={}", runtime.parquet_output_dir);
-    info!("  batch_size={}", runtime.batch_size);
+    info!(
+        "  batch_size={}",
+        if runtime.batch_size == 0 {
+            "[disabled]".to_string()
+        } else {
+            runtime.batch_size.to_string()
+        }
+    );
     info!("  batch_max_age_ms={}", runtime.batch_max_age_ms);
     info!(
         "  ingest_channel_capacity={}",

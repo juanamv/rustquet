@@ -62,7 +62,7 @@ fn pending_batch_len(
 
     if shutting_down {
         pending_events as usize
-    } else if pending_events >= batch_size {
+    } else if batch_size > 0 && pending_events >= batch_size {
         batch_size as usize
     } else if timeout_expired {
         pending_events as usize

@@ -38,7 +38,7 @@ Configuracion runtime por defecto:
 - `SERVER_ADDR=127.0.0.1:3000`
 - `DB_PATH=rustquet_data`
 - `PARQUET_OUTPUT_DIR=parquet_output`
-- `BATCH_SIZE=10000`
+- `BATCH_SIZE=10000` (`0` desactiva flush por cantidad)
 - `BATCH_MAX_AGE_MS=0` (`0` desactiva flush por tiempo)
 - `INGEST_CHANNEL_CAPACITY`
 - `PARQUET_CHANNEL_CAPACITY=1`
@@ -83,8 +83,11 @@ Los batches se pueden cerrar por cantidad o por tiempo:
 
 - si `BATCH_SIZE` se alcanza primero, `rustquet` despacha un batch de ese tamanho exacto
 - si `BATCH_MAX_AGE_MS > 0` y el batch parcial no llega a `BATCH_SIZE` dentro de ese tiempo, `rustquet` despacha un batch parcial
+- si `BATCH_SIZE=0`, el cierre por cantidad queda desactivado
+- si `BATCH_MAX_AGE_MS > 0` y `BATCH_SIZE` no existe, `rustquet` tambien desactiva el cierre por cantidad
 - el reloj del timeout empieza con el primer evento pendiente del batch
 - en restart recovery, si un batch parcial ya vencio, `rustquet` lo despacha inmediatamente
+- `rustquet` requiere que al menos uno de los dos triggers este activo
 
 Precedencia para el schema:
 

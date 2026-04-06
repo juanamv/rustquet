@@ -80,6 +80,28 @@ fn optional_string_from_env(
     })
 }
 
+fn parse_batch_size(
+    env_getter: &dyn Fn(&str) -> Option<String>,
+    batch_max_age_ms: u64,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let batch_size = match env_getter(BATCH_SIZE_ENV) {
+        Some(value) => value.parse::<u64>().map_err(|error| {
+            invalid_input(format!("invalid value for {BATCH_SIZE_ENV}: {error}"))
+        })?,
+        None if batch_max_age_ms > 0 => 0,
+        None => BATCH_SIZE,
+    };
+
+    if batch_size == 0 && batch_max_age_ms == 0 {
+        return Err(invalid_input(
+            "count batching is disabled because BATCH_SIZE is 0, but BATCH_MAX_AGE_MS is also 0; enable at least one batch trigger",
+        )
+        .into());
+    }
+
+    Ok(batch_size)
+}
+
 fn parse_from_env_or_default<T>(
     env_getter: &dyn Fn(&str) -> Option<String>,
     key: &str,
@@ -152,6 +174,10 @@ where
     I: IntoIterator<Item = String>,
     F: Fn(&str) -> Option<String>,
 {
+    let batch_max_age_ms =
+        parse_from_env_or_default(&env_getter, BATCH_MAX_AGE_MS_ENV, BATCH_MAX_AGE_MS)?;
+    let batch_size = parse_batch_size(&env_getter, batch_max_age_ms)?;
+
     Ok(RuntimeConfig {
         server_addr: string_from_env_or_default(&env_getter, SERVER_ADDR_ENV, SERVER_ADDR),
         db_path: string_from_env_or_default(&env_getter, DB_PATH_ENV, DB_PATH),
@@ -160,12 +186,8 @@ where
             PARQUET_OUTPUT_DIR_ENV,
             PARQUET_OUTPUT_DIR,
         ),
-        batch_size: parse_from_env_or_default(&env_getter, BATCH_SIZE_ENV, BATCH_SIZE)?,
-        batch_max_age_ms: parse_from_env_or_default(
-            &env_getter,
-            BATCH_MAX_AGE_MS_ENV,
-            BATCH_MAX_AGE_MS,
-        )?,
+        batch_size,
+        batch_max_age_ms,
         ingest_channel_capacity: parse_from_env_or_else(
             &env_getter,
             INGEST_CHANNEL_CAPACITY_ENV,
