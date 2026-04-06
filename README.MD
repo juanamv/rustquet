@@ -329,7 +329,7 @@ Cada manifest incluye:
 - `batch_id`
 - `schema_version`
 - `files`: lista de archivos Parquet del batch
-- cada entrada de `files` incluye `file_path`, `row_count`, `timestamp_min`, `timestamp_max` y `date`
+- cada entrada de `files` incluye `file_path`, `row_count`, `timestamp_min`, `timestamp_max`, `date`, `year`, `month` y `day`
 - `row_count`
 - `event_id_min` y `event_id_max`
 - `timestamp_min` y `timestamp_max`

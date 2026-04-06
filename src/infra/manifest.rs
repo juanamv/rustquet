@@ -14,6 +14,9 @@ pub struct ManifestDataFile {
     pub timestamp_min: i64,
     pub timestamp_max: i64,
     pub date: String,
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,12 +94,16 @@ pub fn write_manifest(
     let files = parquet_files
         .iter()
         .map(|file| {
+            let (year, month, day) = layout::format_date_parts(file.timestamp_min);
             Ok(ManifestDataFile {
                 file_path: layout::dataset_file_path(Path::new(output_dir), Path::new(&file.path))?,
                 row_count: file.row_count as u64,
                 timestamp_min: file.timestamp_min,
                 timestamp_max: file.timestamp_max,
                 date: file.partition_date.clone(),
+                year,
+                month,
+                day,
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?;
