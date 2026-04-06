@@ -19,6 +19,8 @@ parquet = "58.1.0"
 uuid = { version = "1.23.0", features = ["v4", "v7", "fast-rng"] }
 dotenvy = "0.15.7"
 object_store = { version = "0.13.2", features = ["aws"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt"] }
 
 [[bench]]
 name = "ingest_bench"

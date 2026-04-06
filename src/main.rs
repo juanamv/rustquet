@@ -2,9 +2,18 @@ use std::sync::Arc;
 
 use rustquet::{actors, config, routes, schema, storage, uploader};
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stdout)
+        .with_ansi(false)
+        .with_target(false)
+        .without_time()
+        .init();
+
     let runtime = config::load_runtime_config(std::env::args())?;
     let loaded_config = schema::load_config_from_path(&runtime.schema_config_path)?;
     let active_schema = loaded_config.schema.clone();
@@ -43,26 +52,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = routes::AppState { ingest_tx };
     let app = routes::router(state);
 
-    println!("rustquet runtime configuration:");
-    println!("  server_addr={}", runtime.server_addr);
-    println!("  db_path={}", runtime.db_path);
-    println!("  parquet_output_dir={}", runtime.parquet_output_dir);
-    println!("  batch_size={}", runtime.batch_size);
-    println!(
+    info!("rustquet runtime configuration:");
+    info!("  server_addr={}", runtime.server_addr);
+    info!("  db_path={}", runtime.db_path);
+    info!("  parquet_output_dir={}", runtime.parquet_output_dir);
+    info!("  batch_size={}", runtime.batch_size);
+    info!(
         "  ingest_channel_capacity={}",
         runtime.ingest_channel_capacity
     );
-    println!(
+    info!(
         "  parquet_channel_capacity={}",
         runtime.parquet_channel_capacity
     );
-    println!("  schema_config_path={}", runtime.schema_config_path);
-    println!("  write_manifest={write_manifest}");
-    println!("  push_targets={}", push_targets.len());
+    info!("  schema_config_path={}", runtime.schema_config_path);
+    info!("  write_manifest={write_manifest}");
+    info!("  push_targets={}", push_targets.len());
     for (index, push_target) in push_targets.iter().enumerate() {
-        println!("  push[{index}].name={}", push_target.name());
-        println!("  push[{index}].kind={:?}", push_target.kind());
-        println!(
+        info!("  push[{index}].name={}", push_target.name());
+        info!("  push[{index}].kind={:?}", push_target.kind());
+        info!(
             "  push[{index}].artifacts={}",
             push_target
                 .artifacts()
@@ -71,15 +80,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        println!("  push[{index}].bucket={}", push_target.bucket());
-        println!("  push[{index}].prefix={}", push_target.prefix());
-        println!("  push[{index}].endpoint={}", push_target.endpoint());
-        println!("  push[{index}].region={}", push_target.region());
+        info!("  push[{index}].bucket={}", push_target.bucket());
+        info!("  push[{index}].prefix={}", push_target.prefix());
+        info!("  push[{index}].endpoint={}", push_target.endpoint());
+        info!("  push[{index}].region={}", push_target.region());
     }
-    println!("  schema_version={}", active_schema.version);
+    info!("  schema_version={}", active_schema.version);
 
     let listener = tokio::net::TcpListener::bind(&runtime.server_addr).await?;
-    println!("rustquet listening on {}", runtime.server_addr);
+    info!("rustquet listening on {}", runtime.server_addr);
 
     axum::serve(listener, app).await?;
 

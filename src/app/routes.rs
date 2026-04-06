@@ -1,6 +1,7 @@
 use axum::extract::rejection::JsonRejection;
 use axum::{Json, Router, http::StatusCode, routing::post};
 use tokio::sync::{mpsc, oneshot};
+use tracing::{error, warn};
 
 use crate::app::actors::IngestCmd;
 use crate::domain::models::TelemetryEvent;
@@ -29,7 +30,7 @@ async fn ingest_handler(
     let Json(event) = match payload {
         Ok(payload) => payload,
         Err(error) => {
-            eprintln!("[ingest] invalid json payload: {error}");
+            warn!(error = %error, "invalid json payload");
             return StatusCode::BAD_REQUEST;
         }
     };
@@ -41,12 +42,12 @@ async fn ingest_handler(
         .send(IngestCmd::WriteEvent { event, ack: ack_tx })
         .await
     {
-        eprintln!("[ingest] channel send failed: {error}");
+        error!(error = %error, "channel send failed");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
     if ack_rx.await.is_err() {
-        eprintln!("[ingest] write acknowledgement dropped");
+        error!("write acknowledgement dropped");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 

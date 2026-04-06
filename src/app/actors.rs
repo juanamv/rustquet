@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rocksdb::DB;
 use tokio::sync::{mpsc, oneshot};
+use tracing::{error, info, warn};
 
 use crate::domain::models::TelemetryEvent;
 use crate::domain::schema::SchemaSpec;
@@ -35,7 +36,7 @@ pub enum ParquetCmd {
 
 async fn dispatch_batch(parquet_tx: &mpsc::Sender<ParquetCmd>, batch: ActiveBatch) -> bool {
     if let Err(error) = parquet_tx.send(ParquetCmd::ProcessBatch { batch }).await {
-        eprintln!("[ingest] failed to send batch to parquet actor: {error}");
+        error!(error = %error, "failed to send batch to parquet actor");
         return false;
     }
 
@@ -91,9 +92,7 @@ pub async fn run_ingest_actor(
                         match storage::batch_timestamp_range(&db, next_batch_start_id, batch_len) {
                             Ok(range) => range,
                             Err(error) => {
-                                eprintln!(
-                                    "[ingest] failed to compute batch timestamp range: {error}"
-                                );
+                                error!(error = %error, "failed to compute batch timestamp range");
                                 continue;
                             }
                         };
@@ -113,7 +112,7 @@ pub async fn run_ingest_actor(
                             Some(batch)
                         }
                         Err(error) => {
-                            eprintln!("[ingest] failed to persist active batch: {error}");
+                            error!(error = %error, "failed to persist active batch");
                             None
                         }
                     }
@@ -139,7 +138,7 @@ pub async fn run_ingest_actor(
                 if let Err(error) =
                     storage::append_event(&db, next_event_id, &event, next_event_id + 1)
                 {
-                    eprintln!("[ingest] failed to append event: {error}");
+                    error!(error = %error, event_id = next_event_id, "failed to append event");
                     continue;
                 }
 
@@ -178,7 +177,7 @@ fn finalize_batch(db: &DB, ingest_tx: &mpsc::Sender<IngestCmd>, batch: ActiveBat
     let next_batch_start_id = match storage::finalize_active_batch(db, batch) {
         Ok(next_batch_start_id) => next_batch_start_id,
         Err(error) => {
-            eprintln!("[parquet] failed to finalize batch: {error}");
+            error!(error = %error, batch_id = batch.start_event_id, "failed to finalize batch");
             return;
         }
     };
@@ -199,9 +198,10 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
     } = context;
 
     let Some(schema_spec) = schemas.get(&batch.schema_version) else {
-        eprintln!(
-            "[parquet] missing schema version {} for batch {}",
-            batch.schema_version, batch.start_event_id
+        error!(
+            schema_version = batch.schema_version,
+            batch_id = batch.start_event_id,
+            "missing schema version for batch"
         );
         return;
     };
@@ -213,9 +213,11 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
         .and_then(|path| match crate::infra::manifest::load_manifest(path) {
             Ok(manifest) => Some(manifest),
             Err(error) => {
-                eprintln!(
-                    "[parquet] ignoring invalid manifest for batch {}: {error}",
-                    batch.start_event_id
+                warn!(
+                    error = %error,
+                    batch_id = batch.start_event_id,
+                    manifest_path = %path.display(),
+                    "ignoring invalid manifest"
                 );
                 let _ = std::fs::remove_file(path);
                 None
@@ -234,17 +236,17 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
     let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
         Ok(events) => events,
         Err(error) => {
-            eprintln!("[parquet] failed to read batch from rocksdb: {error}");
+            error!(error = %error, batch_id = batch.start_event_id, "failed to read batch from rocksdb");
             return;
         }
     };
 
     if events.len() != batch.len {
-        eprintln!(
-            "[parquet] expected {} events for batch {}, got {}",
-            batch.len,
-            batch.start_event_id,
-            events.len()
+        error!(
+            expected_events = batch.len,
+            actual_events = events.len(),
+            batch_id = batch.start_event_id,
+            "batch length does not match stored events"
         );
         return;
     }
@@ -262,14 +264,16 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
                 .map(|file| file.path.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!(
-                "[parquet] wrote {} events -> {}",
-                result.row_count, file_list
+            info!(
+                batch_id = batch.start_event_id,
+                row_count = result.row_count,
+                files = %file_list,
+                "wrote parquet batch"
             );
             result
         }
         Err(error) => {
-            eprintln!("[parquet] failed to write files: {error}");
+            error!(error = %error, batch_id = batch.start_event_id, "failed to write files");
             return;
         }
     };
@@ -278,7 +282,7 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
         match crate::infra::manifest::write_manifest(output_dir, batch, &write_result.files) {
             Ok(path) => Some(path),
             Err(error) => {
-                eprintln!("[parquet] failed to write manifest: {error}");
+                error!(error = %error, batch_id = batch.start_event_id, "failed to write manifest");
                 return;
             }
         }
@@ -296,24 +300,28 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
             ) {
                 Ok(uploaded) => {
                     for parquet_uri in uploaded.parquet_uris {
-                        println!(
-                            "[parquet] push '{}' uploaded parquet -> {}",
-                            push_target.name(),
-                            parquet_uri
+                        info!(
+                            push_name = push_target.name(),
+                            uri = %parquet_uri,
+                            batch_id = batch.start_event_id,
+                            "uploaded parquet artifact"
                         );
                     }
                     if let Some(manifest_uri) = uploaded.manifest_uri {
-                        println!(
-                            "[parquet] push '{}' uploaded manifest -> {}",
-                            push_target.name(),
-                            manifest_uri
+                        info!(
+                            push_name = push_target.name(),
+                            uri = %manifest_uri,
+                            batch_id = batch.start_event_id,
+                            "uploaded manifest artifact"
                         );
                     }
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[parquet] push '{}' failed to upload batch artifacts: {error}",
-                        push_target.name()
+                    error!(
+                        error = %error,
+                        push_name = push_target.name(),
+                        batch_id = batch.start_event_id,
+                        "failed to upload batch artifacts"
                     );
                     return;
                 }
@@ -321,7 +329,7 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
         }
 
         if let Err(error) = storage::mark_active_batch_written(db, batch) {
-            eprintln!("[parquet] failed to mark batch as written: {error}");
+            error!(error = %error, batch_id = batch.start_event_id, "failed to mark batch as written");
             return;
         }
     }
