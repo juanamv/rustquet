@@ -361,6 +361,9 @@ cargo test
 # ejecutar tests de integracion
 cargo test --test '*'
 
+# ejecutar macrobenchmarks en proceso con criterion
+cargo bench --bench macrobench
+
 # verificar documentacion
 cargo doc
 ```
