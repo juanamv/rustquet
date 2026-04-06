@@ -1,15 +1,20 @@
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
 use rocksdb::{DB, Options, WriteBatch};
 
 use crate::domain::models::TelemetryEvent;
+use crate::domain::schema::{self, IndexedColumn, SchemaSpec};
 
 const NEXT_EVENT_ID_KEY: &str = "__meta_next_event_id";
 const NEXT_BATCH_START_ID_KEY: &str = "__meta_next_batch_start_id";
 const ACTIVE_BATCH_START_ID_KEY: &str = "__meta_active_batch_start_id";
 const ACTIVE_BATCH_LEN_KEY: &str = "__meta_active_batch_len";
 const ACTIVE_BATCH_STATUS_KEY: &str = "__meta_active_batch_status";
+const ACTIVE_BATCH_SCHEMA_VERSION_KEY: &str = "__meta_active_batch_schema_version";
+const CURRENT_SCHEMA_VERSION_KEY: &str = "__schema_current_version";
+const SCHEMA_VERSION_PREFIX: &str = "__schema_version_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Metadata {
@@ -28,6 +33,7 @@ pub struct ActiveBatch {
     pub start_event_id: u64,
     pub len: usize,
     pub status: ActiveBatchStatus,
+    pub schema_version: u32,
 }
 
 impl ActiveBatchStatus {
@@ -104,6 +110,214 @@ fn parse_event_id(key: &[u8]) -> Option<u64> {
     suffix.parse().ok()
 }
 
+fn parse_schema_version(key: &[u8]) -> Option<u32> {
+    let key = std::str::from_utf8(key).ok()?;
+    let suffix = key.strip_prefix(SCHEMA_VERSION_PREFIX)?;
+    suffix.parse().ok()
+}
+
+fn schema_version_key(version: u32) -> String {
+    format!("{SCHEMA_VERSION_PREFIX}{version:010}")
+}
+
+fn read_u32_metadata_value(
+    db: &DB,
+    key: &[u8],
+) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+    read_metadata_value(db, key)?.map_or(Ok(None), |value| {
+        Ok(Some(u32::try_from(value).map_err(|_| {
+            invalid_data("schema version does not fit in u32")
+        })?))
+    })
+}
+
+fn validate_schema_shape(
+    schema_spec: &SchemaSpec,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut names = HashMap::with_capacity(schema_spec.columns.len());
+
+    for column in &schema_spec.columns {
+        if column.path.is_empty() || column.path.iter().any(|segment| segment.is_empty()) {
+            return Err(invalid_data("schema column path cannot be empty").into());
+        }
+        if schema::is_reserved_column_name(&column.name) {
+            return Err(invalid_data("schema column name is reserved").into());
+        }
+        if names.insert(column.name.as_str(), column).is_some() {
+            return Err(invalid_data("schema contains duplicate column names").into());
+        }
+    }
+
+    Ok(())
+}
+
+fn historical_columns(
+    schemas: &BTreeMap<u32, SchemaSpec>,
+) -> Result<HashMap<&str, &IndexedColumn>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut columns = HashMap::new();
+
+    for schema in schemas.values() {
+        validate_schema_shape(schema)?;
+        for column in &schema.columns {
+            match columns.get(column.name.as_str()) {
+                Some(existing) if *existing != column => {
+                    return Err(
+                        invalid_data("stored schema history redefines an indexed column").into(),
+                    );
+                }
+                None => {
+                    columns.insert(column.name.as_str(), column);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(columns)
+}
+
+fn validate_append_only_schema(
+    current_schema: &SchemaSpec,
+    new_schema: &SchemaSpec,
+    schemas: &BTreeMap<u32, SchemaSpec>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let historical = historical_columns(schemas)?;
+    let mut new_columns = HashMap::with_capacity(new_schema.columns.len());
+    for column in &new_schema.columns {
+        new_columns.insert(column.name.as_str(), column);
+    }
+
+    for current_column in &current_schema.columns {
+        match new_columns.get(current_column.name.as_str()) {
+            Some(column) if *column == current_column => {}
+            _ => {
+                return Err(invalid_data(
+                    "new schema version must preserve existing indexed columns",
+                )
+                .into());
+            }
+        }
+    }
+
+    for column in &new_schema.columns {
+        if let Some(existing) = historical.get(column.name.as_str())
+            && *existing != column
+        {
+            return Err(
+                invalid_data("new schema version cannot redefine an indexed column").into(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_current_schema_version(
+    db: &DB,
+    version: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    db.put(
+        CURRENT_SCHEMA_VERSION_KEY.as_bytes(),
+        metadata_bytes(u64::from(version)),
+    )?;
+    Ok(())
+}
+
+fn persist_schema(
+    db: &DB,
+    schema_spec: &SchemaSpec,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    db.put(
+        schema_version_key(schema_spec.version).as_bytes(),
+        serde_json::to_vec(schema_spec)?,
+    )?;
+    Ok(())
+}
+
+pub fn load_current_schema_version(
+    db: &DB,
+) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+    read_u32_metadata_value(db, CURRENT_SCHEMA_VERSION_KEY.as_bytes())
+}
+
+pub fn load_all_schemas(
+    db: &DB,
+) -> Result<BTreeMap<u32, SchemaSpec>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut schemas = BTreeMap::new();
+
+    for item in db.iterator(rocksdb::IteratorMode::Start) {
+        let (key, value) = item?;
+        let Some(version) = parse_schema_version(&key) else {
+            continue;
+        };
+        let schema_spec: SchemaSpec = serde_json::from_slice(&value)?;
+        if schema_spec.version != version {
+            return Err(invalid_data("stored schema version key does not match payload").into());
+        }
+        validate_schema_shape(&schema_spec)?;
+        schemas.insert(version, schema_spec);
+    }
+
+    Ok(schemas)
+}
+
+pub fn ensure_schema(
+    db: &DB,
+    schema_spec: &SchemaSpec,
+) -> Result<BTreeMap<u32, SchemaSpec>, Box<dyn std::error::Error + Send + Sync>> {
+    validate_schema_shape(schema_spec)?;
+
+    let mut schemas = load_all_schemas(db)?;
+    let current_version = load_current_schema_version(db)?;
+
+    if let Some(version) = current_version {
+        if !schemas.contains_key(&version) {
+            return Err(invalid_data("current schema version is missing from rocksdb").into());
+        }
+        if schema_spec.version < version {
+            return Err(invalid_data("schema version downgrade is not allowed").into());
+        }
+    } else if !schemas.is_empty() {
+        return Err(invalid_data("stored schemas exist without a current schema version").into());
+    }
+
+    match schemas.get(&schema_spec.version) {
+        Some(existing) if existing != schema_spec => {
+            return Err(
+                invalid_data("schema version already exists with a different definition").into(),
+            );
+        }
+        Some(_) => {
+            if current_version != Some(schema_spec.version) {
+                persist_current_schema_version(db, schema_spec.version)?;
+            }
+            return Ok(schemas);
+        }
+        None => {}
+    }
+
+    if let Some(version) = current_version {
+        if schema_spec.version <= version {
+            return Err(invalid_data(
+                "new schema version must be greater than the current version",
+            )
+            .into());
+        }
+        validate_append_only_schema(
+            schemas
+                .get(&version)
+                .ok_or_else(|| invalid_data("current schema version is missing from rocksdb"))?,
+            schema_spec,
+            &schemas,
+        )?;
+    }
+
+    persist_schema(db, schema_spec)?;
+    persist_current_schema_version(db, schema_spec.version)?;
+    schemas.insert(schema_spec.version, schema_spec.clone());
+    Ok(schemas)
+}
+
 fn discover_event_range(
     db: &DB,
 ) -> Result<Option<(u64, u64)>, Box<dyn std::error::Error + Send + Sync>> {
@@ -151,6 +365,7 @@ fn clear_active_batch_metadata(batch: &mut WriteBatch) {
     batch.delete(ACTIVE_BATCH_START_ID_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_LEN_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_STATUS_KEY.as_bytes());
+    batch.delete(ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes());
 }
 
 pub fn load_or_initialize_metadata(
@@ -188,6 +403,7 @@ pub fn load_active_batch(
     let start_event_id = read_metadata_value(db, ACTIVE_BATCH_START_ID_KEY.as_bytes())?;
     let len = read_metadata_value(db, ACTIVE_BATCH_LEN_KEY.as_bytes())?;
     let status = read_active_batch_status(db)?;
+    let schema_version = read_u32_metadata_value(db, ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes())?;
 
     match (start_event_id, len, status) {
         (None, None, None) => Ok(None),
@@ -196,6 +412,9 @@ pub fn load_active_batch(
             len: usize::try_from(len)
                 .map_err(|_| invalid_data("active batch length does not fit in usize"))?,
             status,
+            schema_version: schema_version
+                .or(load_current_schema_version(db)?)
+                .unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
         })),
         _ => Err(invalid_data("incomplete active batch metadata in rocksdb").into()),
     }
@@ -218,6 +437,10 @@ pub fn store_active_batch(
         ACTIVE_BATCH_STATUS_KEY.as_bytes(),
         [active_batch.status.as_byte()],
     );
+    batch.put(
+        ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes(),
+        metadata_bytes(u64::from(active_batch.schema_version)),
+    );
     db.write(batch)?;
     Ok(())
 }
@@ -227,8 +450,12 @@ pub fn mark_active_batch_written(
     active_batch: ActiveBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded = load_active_batch(db)?;
-    if loaded.map(|batch| (batch.start_event_id, batch.len))
-        != Some((active_batch.start_event_id, active_batch.len))
+    if loaded.map(|batch| (batch.start_event_id, batch.len, batch.schema_version))
+        != Some((
+            active_batch.start_event_id,
+            active_batch.len,
+            active_batch.schema_version,
+        ))
     {
         return Err(invalid_data("active batch metadata does not match expected batch").into());
     }
@@ -342,10 +569,15 @@ pub fn delete_batch(
     size: usize,
     next_batch_start_id: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let loaded_batch = load_active_batch(db)?;
     let active_batch = ActiveBatch {
         start_event_id,
         len: size,
         status: ActiveBatchStatus::Written,
+        schema_version: loaded_batch
+            .map(|batch| batch.schema_version)
+            .or(load_current_schema_version(db)?)
+            .unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
     };
 
     let mut batch = WriteBatch::default();
@@ -356,7 +588,7 @@ pub fn delete_batch(
         NEXT_BATCH_START_ID_KEY.as_bytes(),
         metadata_bytes(next_batch_start_id),
     );
-    if load_active_batch(db)? == Some(active_batch) {
+    if loaded_batch == Some(active_batch) {
         clear_active_batch_metadata(&mut batch);
     }
     db.write(batch)?;

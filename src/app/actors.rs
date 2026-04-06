@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rocksdb::DB;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::domain::models::TelemetryEvent;
+use crate::domain::schema::SchemaSpec;
 use crate::infra::storage::{self, ActiveBatch, ActiveBatchStatus};
 
 // ── Command types ──────────────────────────────────────────────────
@@ -61,6 +63,7 @@ pub async fn run_ingest_actor(
     mut rx: mpsc::Receiver<IngestCmd>,
     parquet_tx: mpsc::Sender<ParquetCmd>,
     batch_size: u64,
+    schema_version: u32,
 ) {
     let metadata =
         storage::load_or_initialize_metadata(&db).expect("failed to load metadata from rocksdb");
@@ -87,6 +90,7 @@ pub async fn run_ingest_actor(
                         start_event_id: next_batch_start_id,
                         len: batch_len,
                         status: ActiveBatchStatus::Writing,
+                        schema_version,
                     };
 
                     match storage::store_active_batch(&db, batch) {
@@ -151,8 +155,17 @@ fn process_batch(
     db: &DB,
     ingest_tx: &mpsc::Sender<IngestCmd>,
     output_dir: &str,
+    schemas: &BTreeMap<u32, SchemaSpec>,
     batch: ActiveBatch,
 ) {
+    let Some(schema_spec) = schemas.get(&batch.schema_version) else {
+        eprintln!(
+            "[parquet] missing schema version {} for batch {}",
+            batch.schema_version, batch.start_event_id
+        );
+        return;
+    };
+
     let final_path = crate::infra::parquet::parquet_file_path(output_dir, batch.start_event_id);
 
     if !final_path.exists() {
@@ -174,7 +187,12 @@ fn process_batch(
             return;
         }
 
-        match crate::infra::parquet::write_parquet(&events, batch.start_event_id, output_dir) {
+        match crate::infra::parquet::write_parquet_with_schema(
+            &events,
+            batch.start_event_id,
+            output_dir,
+            schema_spec,
+        ) {
             Ok((file, count)) => {
                 println!("[parquet] wrote {count} events -> {file}");
             }
@@ -208,6 +226,7 @@ pub async fn run_parquet_actor(
     mut rx: mpsc::Receiver<ParquetCmd>,
     ingest_tx: mpsc::Sender<IngestCmd>,
     output_dir: String,
+    schemas: Arc<BTreeMap<u32, SchemaSpec>>,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -215,9 +234,10 @@ pub async fn run_parquet_actor(
                 let db_clone = db.clone();
                 let ingest_tx_clone = ingest_tx.clone();
                 let dir = output_dir.clone();
+                let schemas_clone = schemas.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    process_batch(&db_clone, &ingest_tx_clone, &dir, batch);
+                    process_batch(&db_clone, &ingest_tx_clone, &dir, &schemas_clone, batch);
                 });
             }
         }

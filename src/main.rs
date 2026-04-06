@@ -1,9 +1,13 @@
-use rustquet::{actors, config, routes, storage};
+use std::sync::Arc;
+
+use rustquet::{actors, config, routes, schema, storage};
 use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = storage::open_db(config::DB_PATH)?;
+    let active_schema = schema::load_default_schema()?;
+    let schemas = Arc::new(storage::ensure_schema(&db, &active_schema)?);
 
     let (ingest_tx, ingest_rx) = mpsc::channel(config::INGEST_CHANNEL_CAPACITY);
     let (parquet_tx, parquet_rx) = mpsc::channel(config::PARQUET_CHANNEL_CAPACITY);
@@ -16,12 +20,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ingest_rx,
         parquet_tx,
         config::BATCH_SIZE,
+        active_schema.version,
     ));
     tokio::spawn(actors::run_parquet_actor(
         db_parquet,
         parquet_rx,
         ingest_tx.clone(),
         config::PARQUET_OUTPUT_DIR.to_string(),
+        schemas,
     ));
 
     let state = routes::AppState { ingest_tx };
