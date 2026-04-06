@@ -153,10 +153,14 @@ pub fn build_payloads(prefix: &str, count: usize) -> Vec<Bytes> {
                 serde_json::json!({
                     "id": format!("{prefix}-{index}"),
                     "path": format!("/bench/{}", index % 32),
-                    "event_name": if index % 2 == 0 { "click" } else { "scroll" },
+                    "event_name": if index.is_multiple_of(2) {
+                        "click"
+                    } else {
+                        "scroll"
+                    },
                     "timestamp": FIXED_TIMESTAMP,
                     "metadata": {
-                        "h2o": index % 2 == 0,
+                        "h2o": index.is_multiple_of(2),
                         "slot": format!("slot-{}", index % 8),
                     }
                 })

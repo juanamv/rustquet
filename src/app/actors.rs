@@ -595,6 +595,8 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
 }
 
 #[cfg(test)]
+// Test-only shim that mirrors `ParquetBatchContext` to keep callers concise.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn process_batch_for_test(
     db: &DB,
     batch: ActiveBatch,
