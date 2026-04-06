@@ -449,6 +449,31 @@ fn process_batch(db: &DB, batch: ActiveBatch, context: ParquetBatchContext<'_>) 
     finalize_batch(db, ingest_tx, batch);
 }
 
+#[cfg(test)]
+pub(super) fn process_batch_for_test(
+    db: &DB,
+    batch: ActiveBatch,
+    ingest_tx: &mpsc::Sender<IngestCmd>,
+    output_dir: &str,
+    schemas: &BTreeMap<u32, SchemaSpec>,
+    write_manifest: bool,
+    runtime_handle: &tokio::runtime::Handle,
+    push_targets: &[PushTarget],
+) {
+    process_batch(
+        db,
+        batch,
+        ParquetBatchContext {
+            ingest_tx,
+            output_dir,
+            schemas,
+            write_manifest,
+            runtime_handle,
+            push_targets,
+        },
+    );
+}
+
 pub async fn run_parquet_actor(
     db: Arc<DB>,
     mut rx: mpsc::Receiver<ParquetCmd>,
@@ -484,258 +509,5 @@ pub async fn run_parquet_actor(
                 });
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::domain::schema::{self, PushArtifact};
-    use crate::infra::{manifest, parquet};
-
-    fn test_event(timestamp: i64) -> TelemetryEvent {
-        TelemetryEvent {
-            id: "evt-1".to_string(),
-            path: "/page".to_string(),
-            event_name: "click".to_string(),
-            metadata: serde_json::json!({"slot": "hero"}),
-            timestamp,
-        }
-    }
-
-    fn test_push_target(name: &str, write_manifest: bool) -> PushTarget {
-        let mut artifacts = vec![PushArtifact::Parquet];
-        if write_manifest {
-            artifacts.push(PushArtifact::Manifest);
-        }
-
-        PushTarget::mock_s3_compatible(name, artifacts, "bucket", "dev")
-    }
-
-    fn test_push_targets(write_manifest: bool) -> Vec<PushTarget> {
-        vec![test_push_target("lake_primary", write_manifest)]
-    }
-
-    fn test_schemas() -> BTreeMap<u32, SchemaSpec> {
-        let schema_spec = schema::load_default_schema().unwrap();
-        BTreeMap::from([(schema_spec.version, schema_spec)])
-    }
-
-    #[test]
-    fn test_process_batch_cleans_local_files_after_uploaded_pushes_complete() {
-        let temp_dir = TempDir::new().unwrap();
-        let db = storage::open_db(temp_dir.path().to_str().unwrap()).unwrap();
-        let output_dir = temp_dir.path().join("parquet_output");
-        let output_dir = output_dir.to_string_lossy().to_string();
-        let schema_spec = schema::load_default_schema().unwrap();
-        let event = test_event(1_700_000_000);
-        let batch = ActiveBatch {
-            start_event_id: 1,
-            len: 1,
-            status: ActiveBatchStatus::Writing,
-            schema_version: schema_spec.version,
-            timestamp_min: event.timestamp,
-            timestamp_max: event.timestamp,
-        };
-
-        storage::write_event(&db, &event).unwrap();
-        storage::store_active_batch(&db, batch).unwrap();
-        let write_result = parquet::write_parquet_batch_with_schema(
-            std::slice::from_ref(&event),
-            batch,
-            &output_dir,
-            &schema_spec,
-        )
-        .unwrap();
-        let manifest_path =
-            manifest::write_manifest(&output_dir, batch, &write_result.files).unwrap();
-        storage::mark_active_batch_push_uploaded(&db, batch, "lake_primary").unwrap();
-
-        let push_targets = test_push_targets(true);
-        let schemas = test_schemas();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let runtime_handle = runtime.handle().clone();
-        let (ingest_tx, mut ingest_rx) = mpsc::channel(1);
-
-        process_batch(
-            &db,
-            batch,
-            ParquetBatchContext {
-                ingest_tx: &ingest_tx,
-                output_dir: &output_dir,
-                schemas: &schemas,
-                write_manifest: true,
-                runtime_handle: &runtime_handle,
-                push_targets: &push_targets,
-            },
-        );
-
-        runtime.block_on(async {
-            match ingest_rx.recv().await {
-                Some(IngestCmd::BatchDone {
-                    next_batch_start_id,
-                }) => {
-                    assert_eq!(next_batch_start_id, 2);
-                }
-                _ => panic!("expected BatchDone after cleanup"),
-            }
-        });
-
-        assert!(!Path::new(&write_result.files[0].path).exists());
-        assert!(!Path::new(&manifest_path).exists());
-        assert_eq!(storage::load_active_batch(&db).unwrap(), None);
-        assert!(storage::read_batch(&db, 1, 1).unwrap().is_empty());
-        assert!(
-            storage::load_active_batch_uploaded_pushes(&db)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn test_process_batch_finalizes_written_remote_batch_without_local_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let db = storage::open_db(temp_dir.path().to_str().unwrap()).unwrap();
-        let output_dir = temp_dir.path().join("parquet_output");
-        let output_dir = output_dir.to_string_lossy().to_string();
-        let schema_spec = schema::load_default_schema().unwrap();
-        let event = test_event(1_700_000_001);
-        let batch = ActiveBatch {
-            start_event_id: 1,
-            len: 1,
-            status: ActiveBatchStatus::Written,
-            schema_version: schema_spec.version,
-            timestamp_min: event.timestamp,
-            timestamp_max: event.timestamp,
-        };
-
-        storage::write_event(&db, &event).unwrap();
-        storage::store_active_batch(&db, batch).unwrap();
-
-        let push_targets = test_push_targets(false);
-        let schemas = test_schemas();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let runtime_handle = runtime.handle().clone();
-        let (ingest_tx, mut ingest_rx) = mpsc::channel(1);
-
-        process_batch(
-            &db,
-            batch,
-            ParquetBatchContext {
-                ingest_tx: &ingest_tx,
-                output_dir: &output_dir,
-                schemas: &schemas,
-                write_manifest: false,
-                runtime_handle: &runtime_handle,
-                push_targets: &push_targets,
-            },
-        );
-
-        runtime.block_on(async {
-            match ingest_rx.recv().await {
-                Some(IngestCmd::BatchDone {
-                    next_batch_start_id,
-                }) => {
-                    assert_eq!(next_batch_start_id, 2);
-                }
-                _ => panic!("expected BatchDone for written remote batch"),
-            }
-        });
-
-        assert_eq!(storage::load_active_batch(&db).unwrap(), None);
-        assert!(storage::read_batch(&db, 1, 1).unwrap().is_empty());
-        assert!(
-            crate::infra::parquet::parquet_file_paths(&output_dir, batch.start_event_id).is_empty()
-        );
-    }
-
-    #[test]
-    fn test_process_batch_retries_only_pending_push_after_restart_then_cleans_local_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let db = storage::open_db(temp_dir.path().to_str().unwrap()).unwrap();
-        let output_dir = temp_dir.path().join("parquet_output");
-        let output_dir = output_dir.to_string_lossy().to_string();
-        let schema_spec = schema::load_default_schema().unwrap();
-        let event = test_event(1_700_000_010);
-        let batch = ActiveBatch {
-            start_event_id: 1,
-            len: 1,
-            status: ActiveBatchStatus::Writing,
-            schema_version: schema_spec.version,
-            timestamp_min: event.timestamp,
-            timestamp_max: event.timestamp,
-        };
-
-        storage::write_event(&db, &event).unwrap();
-        storage::store_active_batch(&db, batch).unwrap();
-        let write_result = parquet::write_parquet_batch_with_schema(
-            std::slice::from_ref(&event),
-            batch,
-            &output_dir,
-            &schema_spec,
-        )
-        .unwrap();
-        let manifest_path =
-            manifest::write_manifest(&output_dir, batch, &write_result.files).unwrap();
-
-        let push_primary = test_push_target("lake_primary", true);
-        let push_backup = test_push_target("lake_backup", true);
-        let push_targets = vec![push_primary, push_backup];
-        let schemas = test_schemas();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let runtime_handle = runtime.handle().clone();
-        let (ingest_tx, mut ingest_rx) = mpsc::channel(1);
-
-        push_targets[0]
-            .upload_batch_artifacts(
-                &runtime_handle,
-                &output_dir,
-                &write_result.files,
-                Some(Path::new(&manifest_path)),
-            )
-            .unwrap();
-        storage::mark_active_batch_push_uploaded(&db, batch, push_targets[0].name()).unwrap();
-        assert_eq!(push_targets[0].upload_count(), 2);
-        assert_eq!(push_targets[1].upload_count(), 0);
-
-        process_batch(
-            &db,
-            batch,
-            ParquetBatchContext {
-                ingest_tx: &ingest_tx,
-                output_dir: &output_dir,
-                schemas: &schemas,
-                write_manifest: true,
-                runtime_handle: &runtime_handle,
-                push_targets: &push_targets,
-            },
-        );
-
-        runtime.block_on(async {
-            match ingest_rx.recv().await {
-                Some(IngestCmd::BatchDone {
-                    next_batch_start_id,
-                }) => {
-                    assert_eq!(next_batch_start_id, 2);
-                }
-                _ => panic!("expected BatchDone after retrying pending push"),
-            }
-        });
-
-        assert_eq!(push_targets[0].upload_count(), 2);
-        assert_eq!(push_targets[1].upload_count(), 2);
-        assert!(!Path::new(&write_result.files[0].path).exists());
-        assert!(!Path::new(&manifest_path).exists());
-        assert_eq!(storage::load_active_batch(&db).unwrap(), None);
-        assert!(storage::read_batch(&db, 1, 1).unwrap().is_empty());
-        assert!(
-            storage::load_active_batch_uploaded_pushes(&db)
-                .unwrap()
-                .is_empty()
-        );
     }
 }
