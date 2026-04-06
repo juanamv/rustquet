@@ -4,3 +4,6 @@
 /parquet_output
 tests.rs
 config.json
+config_v2.json
+config_v2_overwrite.json
+config_v3_nested.json
