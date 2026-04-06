@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "columns": [
+    {
+      "name": "h2o",
+      "source": "metadata.h2o",
+      "type": "boolean"
+    },
+    {
+      "name": "slot",
+      "source": "metadata.slot",
+      "type": "string"
+    },
+    {
+      "name": "region",
+      "source": "metadata.region",
+      "type": "string"
+    },
+    {
+      "name": "country",
+      "source": "metadata.geo.country",
+      "type": "string"
+    }
+  ]
+}

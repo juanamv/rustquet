@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "columns": [
+    {
+      "name": "h2o",
+      "source": "metadata.h2o",
+      "type": "boolean"
+    },
+    {
+      "name": "slot",
+      "source": "metadata.slot",
+      "type": "string"
+    }
+  ]
+}
