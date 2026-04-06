@@ -21,6 +21,7 @@ dotenvy = "0.15.7"
 object_store = { version = "0.13.2", features = ["aws"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [[bench]]
 name = "ingest_bench"

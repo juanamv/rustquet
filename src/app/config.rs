@@ -1,13 +1,22 @@
 use std::io::{Error, ErrorKind};
 
+use sysinfo::System;
+
 use crate::domain::schema;
 
 pub const BATCH_SIZE: u64 = 10_000;
 pub const INGEST_CHANNEL_CAPACITY: usize = 8_192;
+pub const MAX_INGEST_CHANNEL_CAPACITY: usize = 65_536;
 pub const PARQUET_CHANNEL_CAPACITY: usize = 1;
 pub const DB_PATH: &str = "rustquet_data";
 pub const PARQUET_OUTPUT_DIR: &str = "parquet_output";
 pub const SERVER_ADDR: &str = "127.0.0.1:3000";
+
+const ESTIMATED_EVENT_SIZE_BYTES: u64 = 2 * 1024;
+const MIN_INGEST_CHANNEL_MEMORY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INGEST_CHANNEL_MEMORY_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+const INGEST_CHANNEL_MEMORY_FRACTION_DIVISOR: u64 = 100;
+const CHANNEL_CAPACITY_ROUNDING: usize = 1_024;
 
 const SERVER_ADDR_ENV: &str = "SERVER_ADDR";
 const DB_PATH_ENV: &str = "DB_PATH";
@@ -73,6 +82,53 @@ where
     }
 }
 
+fn parse_from_env_or_else<T, F>(
+    env_getter: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    default: F,
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+    F: FnOnce() -> T,
+{
+    match env_getter(key) {
+        Some(value) => value
+            .parse::<T>()
+            .map_err(|error| invalid_input(format!("invalid value for {key}: {error}")).into()),
+        None => Ok(default()),
+    }
+}
+
+fn detect_total_memory_bytes() -> Option<u64> {
+    let mut system = System::new();
+    system.refresh_memory();
+
+    let total_memory_bytes = system.total_memory();
+    (total_memory_bytes > 0).then_some(total_memory_bytes)
+}
+
+pub(crate) fn auto_ingest_channel_capacity_from_total_memory(total_memory_bytes: u64) -> usize {
+    let memory_budget_bytes = (total_memory_bytes / INGEST_CHANNEL_MEMORY_FRACTION_DIVISOR).clamp(
+        MIN_INGEST_CHANNEL_MEMORY_BUDGET_BYTES,
+        MAX_INGEST_CHANNEL_MEMORY_BUDGET_BYTES,
+    );
+    let raw_capacity = memory_budget_bytes / ESTIMATED_EVENT_SIZE_BYTES;
+    let bounded_capacity = usize::try_from(raw_capacity)
+        .unwrap_or(MAX_INGEST_CHANNEL_CAPACITY)
+        .clamp(INGEST_CHANNEL_CAPACITY, MAX_INGEST_CHANNEL_CAPACITY);
+    let rounded_capacity =
+        (bounded_capacity / CHANNEL_CAPACITY_ROUNDING) * CHANNEL_CAPACITY_ROUNDING;
+
+    rounded_capacity.clamp(INGEST_CHANNEL_CAPACITY, MAX_INGEST_CHANNEL_CAPACITY)
+}
+
+pub(crate) fn auto_ingest_channel_capacity() -> usize {
+    detect_total_memory_bytes()
+        .map(auto_ingest_channel_capacity_from_total_memory)
+        .unwrap_or(INGEST_CHANNEL_CAPACITY)
+}
+
 pub(crate) fn load_runtime_config_from_env<I, F>(
     args: I,
     env_getter: F,
@@ -90,10 +146,10 @@ where
             PARQUET_OUTPUT_DIR,
         ),
         batch_size: parse_from_env_or_default(&env_getter, BATCH_SIZE_ENV, BATCH_SIZE)?,
-        ingest_channel_capacity: parse_from_env_or_default(
+        ingest_channel_capacity: parse_from_env_or_else(
             &env_getter,
             INGEST_CHANNEL_CAPACITY_ENV,
-            INGEST_CHANNEL_CAPACITY,
+            auto_ingest_channel_capacity,
         )?,
         parquet_channel_capacity: parse_from_env_or_default(
             &env_getter,
