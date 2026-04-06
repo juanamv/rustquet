@@ -13,6 +13,8 @@ const ACTIVE_BATCH_START_ID_KEY: &str = "__meta_active_batch_start_id";
 const ACTIVE_BATCH_LEN_KEY: &str = "__meta_active_batch_len";
 const ACTIVE_BATCH_STATUS_KEY: &str = "__meta_active_batch_status";
 const ACTIVE_BATCH_SCHEMA_VERSION_KEY: &str = "__meta_active_batch_schema_version";
+const ACTIVE_BATCH_TIMESTAMP_MIN_KEY: &str = "__meta_active_batch_timestamp_min";
+const ACTIVE_BATCH_TIMESTAMP_MAX_KEY: &str = "__meta_active_batch_timestamp_max";
 const CURRENT_SCHEMA_VERSION_KEY: &str = "__schema_current_version";
 const SCHEMA_VERSION_PREFIX: &str = "__schema_version_";
 
@@ -34,6 +36,8 @@ pub struct ActiveBatch {
     pub len: usize,
     pub status: ActiveBatchStatus,
     pub schema_version: u32,
+    pub timestamp_min: i64,
+    pub timestamp_max: i64,
 }
 
 impl ActiveBatchStatus {
@@ -73,6 +77,10 @@ fn metadata_bytes(value: u64) -> [u8; 8] {
     value.to_le_bytes()
 }
 
+fn timestamp_bytes(value: i64) -> [u8; 8] {
+    value.to_le_bytes()
+}
+
 fn read_metadata_value(
     db: &DB,
     key: &[u8],
@@ -84,6 +92,22 @@ fn read_metadata_value(
                 .try_into()
                 .map_err(|_| invalid_data("invalid metadata value in rocksdb"))?;
             Ok(Some(u64::from_le_bytes(arr)))
+        }
+        None => Ok(None),
+    }
+}
+
+fn read_timestamp_value(
+    db: &DB,
+    key: &[u8],
+) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
+    match db.get(key)? {
+        Some(bytes) => {
+            let arr: [u8; 8] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| invalid_data("invalid timestamp value in rocksdb"))?;
+            Ok(Some(i64::from_le_bytes(arr)))
         }
         None => Ok(None),
     }
@@ -366,6 +390,8 @@ fn clear_active_batch_metadata(batch: &mut WriteBatch) {
     batch.delete(ACTIVE_BATCH_LEN_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_STATUS_KEY.as_bytes());
     batch.delete(ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes());
+    batch.delete(ACTIVE_BATCH_TIMESTAMP_MIN_KEY.as_bytes());
+    batch.delete(ACTIVE_BATCH_TIMESTAMP_MAX_KEY.as_bytes());
 }
 
 pub fn load_or_initialize_metadata(
@@ -404,18 +430,36 @@ pub fn load_active_batch(
     let len = read_metadata_value(db, ACTIVE_BATCH_LEN_KEY.as_bytes())?;
     let status = read_active_batch_status(db)?;
     let schema_version = read_u32_metadata_value(db, ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes())?;
+    let timestamp_min = read_timestamp_value(db, ACTIVE_BATCH_TIMESTAMP_MIN_KEY.as_bytes())?;
+    let timestamp_max = read_timestamp_value(db, ACTIVE_BATCH_TIMESTAMP_MAX_KEY.as_bytes())?;
 
     match (start_event_id, len, status) {
         (None, None, None) => Ok(None),
-        (Some(start_event_id), Some(len), Some(status)) => Ok(Some(ActiveBatch {
-            start_event_id,
-            len: usize::try_from(len)
-                .map_err(|_| invalid_data("active batch length does not fit in usize"))?,
-            status,
-            schema_version: schema_version
-                .or(load_current_schema_version(db)?)
-                .unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
-        })),
+        (Some(start_event_id), Some(len), Some(status)) => {
+            let len = usize::try_from(len)
+                .map_err(|_| invalid_data("active batch length does not fit in usize"))?;
+            let (timestamp_min, timestamp_max) = match (timestamp_min, timestamp_max) {
+                (Some(timestamp_min), Some(timestamp_max)) => (timestamp_min, timestamp_max),
+                (None, None) => batch_timestamp_range(db, start_event_id, len)?,
+                _ => {
+                    return Err(invalid_data(
+                        "incomplete active batch timestamp metadata in rocksdb",
+                    )
+                    .into());
+                }
+            };
+
+            Ok(Some(ActiveBatch {
+                start_event_id,
+                len,
+                status,
+                schema_version: schema_version
+                    .or(load_current_schema_version(db)?)
+                    .unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
+                timestamp_min,
+                timestamp_max,
+            }))
+        }
         _ => Err(invalid_data("incomplete active batch metadata in rocksdb").into()),
     }
 }
@@ -441,6 +485,14 @@ pub fn store_active_batch(
         ACTIVE_BATCH_SCHEMA_VERSION_KEY.as_bytes(),
         metadata_bytes(u64::from(active_batch.schema_version)),
     );
+    batch.put(
+        ACTIVE_BATCH_TIMESTAMP_MIN_KEY.as_bytes(),
+        timestamp_bytes(active_batch.timestamp_min),
+    );
+    batch.put(
+        ACTIVE_BATCH_TIMESTAMP_MAX_KEY.as_bytes(),
+        timestamp_bytes(active_batch.timestamp_max),
+    );
     db.write(batch)?;
     Ok(())
 }
@@ -450,13 +502,21 @@ pub fn mark_active_batch_written(
     active_batch: ActiveBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded = load_active_batch(db)?;
-    if loaded.map(|batch| (batch.start_event_id, batch.len, batch.schema_version))
-        != Some((
-            active_batch.start_event_id,
-            active_batch.len,
-            active_batch.schema_version,
-        ))
-    {
+    if loaded.map(|batch| {
+        (
+            batch.start_event_id,
+            batch.len,
+            batch.schema_version,
+            batch.timestamp_min,
+            batch.timestamp_max,
+        )
+    }) != Some((
+        active_batch.start_event_id,
+        active_batch.len,
+        active_batch.schema_version,
+        active_batch.timestamp_min,
+        active_batch.timestamp_max,
+    )) {
         return Err(invalid_data("active batch metadata does not match expected batch").into());
     }
 
@@ -562,6 +622,49 @@ pub fn read_batch(
     Ok(events)
 }
 
+pub fn batch_timestamp_range(
+    db: &DB,
+    start_event_id: u64,
+    size: usize,
+) -> Result<(i64, i64), Box<dyn std::error::Error + Send + Sync>> {
+    if size == 0 {
+        return Err(invalid_data("cannot read timestamp range for an empty batch").into());
+    }
+
+    let start_key = event_key(start_event_id);
+    let iter = db.iterator(rocksdb::IteratorMode::From(
+        start_key.as_bytes(),
+        rocksdb::Direction::Forward,
+    ));
+    let mut timestamp_min = i64::MAX;
+    let mut timestamp_max = i64::MIN;
+    let mut seen = 0usize;
+
+    for item in iter {
+        if seen >= size {
+            break;
+        }
+
+        let (key, value) = item?;
+        if !key.starts_with(b"event_") {
+            continue;
+        }
+
+        let event: TelemetryEvent = serde_json::from_slice(&value)?;
+        timestamp_min = timestamp_min.min(event.timestamp);
+        timestamp_max = timestamp_max.max(event.timestamp);
+        seen += 1;
+    }
+
+    if seen != size {
+        return Err(
+            invalid_data("active batch is missing events required to compute timestamps").into(),
+        );
+    }
+
+    Ok((timestamp_min, timestamp_max))
+}
+
 #[allow(dead_code)]
 pub fn delete_batch(
     db: &DB,
@@ -570,14 +673,28 @@ pub fn delete_batch(
     next_batch_start_id: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded_batch = load_active_batch(db)?;
+    let (schema_version, timestamp_min, timestamp_max) = match loaded_batch {
+        Some(batch) => (
+            batch.schema_version,
+            batch.timestamp_min,
+            batch.timestamp_max,
+        ),
+        None => {
+            let (timestamp_min, timestamp_max) = batch_timestamp_range(db, start_event_id, size)?;
+            (
+                load_current_schema_version(db)?.unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
+                timestamp_min,
+                timestamp_max,
+            )
+        }
+    };
     let active_batch = ActiveBatch {
         start_event_id,
         len: size,
         status: ActiveBatchStatus::Written,
-        schema_version: loaded_batch
-            .map(|batch| batch.schema_version)
-            .or(load_current_schema_version(db)?)
-            .unwrap_or(schema::DEFAULT_SCHEMA_VERSION),
+        schema_version,
+        timestamp_min,
+        timestamp_max,
     };
 
     let mut batch = WriteBatch::default();

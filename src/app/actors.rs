@@ -86,11 +86,24 @@ pub async fn run_ingest_actor(
                 );
 
                 if batch_len > 0 {
+                    let (timestamp_min, timestamp_max) =
+                        match storage::batch_timestamp_range(&db, next_batch_start_id, batch_len) {
+                            Ok(range) => range,
+                            Err(error) => {
+                                eprintln!(
+                                    "[ingest] failed to compute batch timestamp range: {error}"
+                                );
+                                continue;
+                            }
+                        };
+
                     let batch = ActiveBatch {
                         start_event_id: next_batch_start_id,
                         len: batch_len,
                         status: ActiveBatchStatus::Writing,
                         schema_version,
+                        timestamp_min,
+                        timestamp_max,
                     };
 
                     match storage::store_active_batch(&db, batch) {
@@ -166,7 +179,12 @@ fn process_batch(
         return;
     };
 
-    let final_path = crate::infra::parquet::parquet_file_path(output_dir, batch.start_event_id);
+    let expected_final_path = crate::infra::parquet::parquet_file_path_for_batch(output_dir, batch);
+    let mut final_path = if expected_final_path.exists() {
+        expected_final_path
+    } else {
+        crate::infra::parquet::parquet_file_path(output_dir, batch.start_event_id)
+    };
 
     if !final_path.exists() {
         let events = match storage::read_batch(db, batch.start_event_id, batch.len) {
@@ -187,13 +205,14 @@ fn process_batch(
             return;
         }
 
-        match crate::infra::parquet::write_parquet_with_schema(
+        match crate::infra::parquet::write_parquet_batch_with_schema(
             &events,
-            batch.start_event_id,
+            batch,
             output_dir,
             schema_spec,
         ) {
             Ok((file, count)) => {
+                final_path = std::path::PathBuf::from(&file);
                 println!("[parquet] wrote {count} events -> {file}");
             }
             Err(error) => {
@@ -201,6 +220,11 @@ fn process_batch(
                 return;
             }
         }
+    }
+
+    if let Err(error) = crate::infra::manifest::write_manifest(output_dir, batch, &final_path) {
+        eprintln!("[parquet] failed to write manifest: {error}");
+        return;
     }
 
     if let Err(error) = storage::mark_active_batch_written(db, batch) {

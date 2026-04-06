@@ -22,6 +22,8 @@ Recibe eventos por HTTP, los persiste en RocksDB de forma inmediata y los convie
 - `POST /ingest` — recibe eventos JSON
 - persistencia inmediata en RocksDB antes de responder
 - conversion a Parquet en `parquet_output/` cuando un batch alcanza su tamanho exacto
+- salida particionada por rango de fechas del batch
+- manifest JSON por batch en `manifests/`
 - recuperacion automatica de batches pendientes tras reinicios
 - columnas indexadas configurables via `config.json`
 - versionado de schema con reglas append-only
@@ -186,23 +188,53 @@ El servidor recupera el estado de RocksDB automaticamente:
 
 1. lee `next_event_id` y `next_batch_start_id`
 2. si existe un `active_batch`, verifica si el archivo `.parquet` final ya existe
-3. si el archivo `.parquet` existe → limpia el batch de RocksDB sin regenerar
-4. si el archivo `.parquet` falta → regenera el batch desde RocksDB
-5. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
+3. si el archivo `.parquet` existe y falta el manifest → regenera el manifest
+4. si el archivo `.parquet` existe → limpia el batch de RocksDB sin reescribir el Parquet
+5. si el archivo `.parquet` falta → regenera el batch desde RocksDB
+6. si existe un archivo `.tmp` obsoleto → se descarta y se genera uno nuevo
 
 No se requiere intervencion manual.
 
 ## Archivos generados
 
-Ubicacion: `parquet_output/`
+Ubicacion principal: `parquet_output/`
 
-Nombrado deterministico:
+Particionado por rango de fechas del batch:
+
+```text
+parquet_output/
+  date_start=2026-04-05/
+    date_end=2026-04-05/
+      batch_0000000001_20260405T140000Z_20260405T140459Z.parquet
+```
+
+El nombre del archivo incluye:
+
+- `batch_id` deterministico (`start_event_id`)
+- `timestamp_min` del batch en UTC
+- `timestamp_max` del batch en UTC
+
+Manifests por batch:
 
 ```
-batch_0000000001.parquet
+manifests/
+  date_start=2026-04-05/
+    date_end=2026-04-05/
+      batch_0000000001_20260405T140000Z_20260405T140459Z.json
 ```
 
-El servidor escribe a un archivo `.tmp` y luego hace `rename` atomico para garantizar consistencia.
+Cada manifest incluye:
+
+- `batch_id`
+- `schema_version`
+- `file_path`
+- `row_count`
+- `event_id_min` y `event_id_max`
+- `timestamp_min` y `timestamp_max`
+- `date_start` y `date_end`
+- `created_at`
+
+El servidor escribe primero a archivos `.tmp` y luego hace `rename` atomico para garantizar consistencia.
 
 ## Comandos
 

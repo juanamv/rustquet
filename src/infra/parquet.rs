@@ -1,4 +1,6 @@
 use std::io::Cursor;
+use std::io::{Error, ErrorKind};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ use serde_json::Value;
 
 use crate::domain::models::TelemetryEvent;
 use crate::domain::schema::{self, ColumnType, SchemaSpec};
+use crate::infra::layout;
+use crate::infra::storage::ActiveBatch;
 
 enum IndexedBuilder {
     Bool(BooleanBuilder),
@@ -70,12 +74,50 @@ fn metadata_value<'a>(metadata: &'a Value, path: &[String]) -> Option<&'a Value>
     Some(value)
 }
 
-pub fn parquet_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
-    PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
+fn invalid_data(message: &str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
 }
 
-fn parquet_temp_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
-    PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet.tmp"))
+fn event_timestamp_range(
+    events: &[TelemetryEvent],
+) -> Result<(i64, i64), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(first) = events.first() else {
+        return Err(invalid_data("cannot write parquet for an empty batch").into());
+    };
+
+    let mut timestamp_min = first.timestamp;
+    let mut timestamp_max = first.timestamp;
+    for event in &events[1..] {
+        timestamp_min = timestamp_min.min(event.timestamp);
+        timestamp_max = timestamp_max.max(event.timestamp);
+    }
+
+    Ok((timestamp_min, timestamp_max))
+}
+
+pub fn parquet_file_path(output_dir: &str, batch_start_id: u64) -> PathBuf {
+    layout::find_batch_file(Path::new(output_dir), batch_start_id, "parquet").unwrap_or_else(|| {
+        PathBuf::from(output_dir).join(format!("batch_{batch_start_id:010}.parquet"))
+    })
+}
+
+pub fn parquet_file_path_for_batch(output_dir: &str, batch: ActiveBatch) -> PathBuf {
+    layout::partition_directory(
+        Path::new(output_dir),
+        batch.timestamp_min,
+        batch.timestamp_max,
+    )
+    .join(layout::batch_file_name(
+        batch.start_event_id,
+        batch.timestamp_min,
+        batch.timestamp_max,
+        "parquet",
+    ))
+}
+
+pub fn parquet_temp_file_path_for_batch(output_dir: &str, batch: ActiveBatch) -> PathBuf {
+    let final_path = parquet_file_path_for_batch(output_dir, batch);
+    final_path.with_extension("parquet.tmp")
 }
 
 pub fn write_parquet(
@@ -93,14 +135,63 @@ pub fn write_parquet_with_schema(
     output_dir: &str,
     schema_spec: &SchemaSpec,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(output_dir)?;
+    let (timestamp_min, timestamp_max) = event_timestamp_range(events)?;
+    write_parquet_with_layout(
+        events,
+        batch_start_id,
+        timestamp_min,
+        timestamp_max,
+        output_dir,
+        schema_spec,
+    )
+}
 
-    let final_path = parquet_file_path(output_dir, batch_start_id);
+pub fn write_parquet_batch_with_schema(
+    events: &[TelemetryEvent],
+    batch: ActiveBatch,
+    output_dir: &str,
+    schema_spec: &SchemaSpec,
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+    if events.len() != batch.len {
+        return Err(invalid_data("batch metadata does not match parquet row count").into());
+    }
+
+    write_parquet_with_layout(
+        events,
+        batch.start_event_id,
+        batch.timestamp_min,
+        batch.timestamp_max,
+        output_dir,
+        schema_spec,
+    )
+}
+
+fn write_parquet_with_layout(
+    events: &[TelemetryEvent],
+    batch_start_id: u64,
+    timestamp_min: i64,
+    timestamp_max: i64,
+    output_dir: &str,
+    schema_spec: &SchemaSpec,
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+    let partition_dir =
+        layout::partition_directory(Path::new(output_dir), timestamp_min, timestamp_max);
+    std::fs::create_dir_all(&partition_dir)?;
+
+    let batch = ActiveBatch {
+        start_event_id: batch_start_id,
+        len: events.len(),
+        status: crate::infra::storage::ActiveBatchStatus::Writing,
+        schema_version: schema_spec.version,
+        timestamp_min,
+        timestamp_max,
+    };
+    let final_path = parquet_file_path_for_batch(output_dir, batch);
     if final_path.exists() {
         return Ok((final_path.to_string_lossy().into_owned(), events.len()));
     }
 
-    let temp_path = parquet_temp_file_path(output_dir, batch_start_id);
+    let temp_path = parquet_temp_file_path_for_batch(output_dir, batch);
     if temp_path.exists() {
         std::fs::remove_file(&temp_path)?;
     }

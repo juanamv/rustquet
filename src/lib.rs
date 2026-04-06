@@ -4,4 +4,4 @@ pub mod infra;
 
 pub use app::{actors, config, routes};
 pub use domain::{models, schema};
-pub use infra::{parquet, storage};
+pub use infra::{manifest, parquet, storage};
