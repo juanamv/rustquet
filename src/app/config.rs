@@ -25,6 +25,7 @@ const BATCH_SIZE_ENV: &str = "BATCH_SIZE";
 const INGEST_CHANNEL_CAPACITY_ENV: &str = "INGEST_CHANNEL_CAPACITY";
 const PARQUET_CHANNEL_CAPACITY_ENV: &str = "PARQUET_CHANNEL_CAPACITY";
 const SCHEMA_CONFIG_PATH_ENV: &str = "SCHEMA_CONFIG_PATH";
+const INGEST_BEARER_TOKEN_ENV: &str = "INGEST_BEARER_TOKEN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
@@ -35,6 +36,7 @@ pub struct RuntimeConfig {
     pub ingest_channel_capacity: usize,
     pub parquet_channel_capacity: usize,
     pub schema_config_path: String,
+    pub ingest_bearer_token: Option<String>,
 }
 
 fn invalid_input(message: impl Into<String>) -> Error {
@@ -63,6 +65,16 @@ fn string_from_env_or_default(
     default: &str,
 ) -> String {
     env_getter(key).unwrap_or_else(|| default.to_string())
+}
+
+fn optional_string_from_env(
+    env_getter: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+) -> Option<String> {
+    env_getter(key).and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn parse_from_env_or_default<T>(
@@ -159,6 +171,7 @@ where
         schema_config_path: first_user_argument(args)
             .or_else(|| env_getter(SCHEMA_CONFIG_PATH_ENV))
             .unwrap_or_else(|| schema::DEFAULT_CONFIG_PATH.to_string()),
+        ingest_bearer_token: optional_string_from_env(&env_getter, INGEST_BEARER_TOKEN_ENV),
     })
 }
 

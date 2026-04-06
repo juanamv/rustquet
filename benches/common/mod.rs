@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tower::util::ServiceExt;
 
 pub const FIXED_TIMESTAMP: i64 = 1_735_603_200;
+const BENCH_BEARER_TOKEN: &str = "bench-bearer-token";
 
 const WAIT_ATTEMPTS: usize = 120;
 const WAIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -70,6 +71,7 @@ impl BenchHarness {
 
         let app = routes::router(routes::AppState {
             ingest_tx: ingest_tx.clone(),
+            bearer_token: Some(Arc::<str>::from(BENCH_BEARER_TOKEN)),
         });
 
         Self {
@@ -211,6 +213,7 @@ fn build_request(body: Bytes) -> Request<Body> {
         .method("POST")
         .uri("/ingest")
         .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {BENCH_BEARER_TOKEN}"))
         .body(Body::from(body))
         .expect("failed to build benchmark request")
 }

@@ -49,7 +49,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         push_targets.clone(),
     ));
 
-    let state = routes::AppState { ingest_tx };
+    let bearer_token = runtime.ingest_bearer_token.map(Arc::<str>::from);
+    let bearer_auth_enabled = bearer_token.is_some();
+    if !bearer_auth_enabled {
+        println!("INGEST_BEARER_TOKEN not set; bearer auth disabled");
+    }
+
+    let state = routes::AppState {
+        ingest_tx,
+        bearer_token,
+    };
     let app = routes::router(state);
 
     info!("rustquet runtime configuration:");
@@ -66,6 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         runtime.parquet_channel_capacity
     );
     info!("  schema_config_path={}", runtime.schema_config_path);
+    info!(
+        "  ingest_bearer_token={}",
+        if bearer_auth_enabled {
+            "[configured]"
+        } else {
+            "[disabled]"
+        }
+    );
     info!("  write_manifest={write_manifest}");
     info!("  push_targets={}", push_targets.len());
     for (index, push_target) in push_targets.iter().enumerate() {

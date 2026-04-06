@@ -66,6 +66,8 @@ BATCH_SIZE=10000
 INGEST_CHANNEL_CAPACITY=32768
 PARQUET_CHANNEL_CAPACITY=1
 SCHEMA_CONFIG_PATH=config.json
+# opcional: si falta, rustquet arranca sin auth bearer
+INGEST_BEARER_TOKEN=replace-with-a-long-random-secret
 
 # valores resueltos por un destino push definido en config.json
 LAKE_BUCKET=telemetry-bucket
@@ -86,6 +88,8 @@ Precedencia para el schema:
 - `config.json`
 
 El servidor escucha en `127.0.0.1:3000`.
+
+`INGEST_BEARER_TOKEN` es opcional. Si existe y no esta vacio, `rustquet` protege todas las rutas con `Authorization: Bearer <token>`. Si falta, el servidor arranca igual y escribe `INGEST_BEARER_TOKEN not set; bearer auth disabled`.
 
 ## API HTTP
 
@@ -118,10 +122,15 @@ Recibe un evento JSON.
 
 **Respuesta:** `201 Created`
 
+Header requerido cuando `INGEST_BEARER_TOKEN` esta configurado:
+
+- `Authorization: Bearer <INGEST_BEARER_TOKEN>`
+
 **Ejemplo con curl:**
 
 ```bash
 curl -X POST http://127.0.0.1:3000/ingest \
+  -H "Authorization: Bearer $INGEST_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "abc123",
