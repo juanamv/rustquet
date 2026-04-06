@@ -7,7 +7,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
 
-use crate::domain::schema::{PushArtifact, PushKind, PushSpec};
+use crate::domain::schema::schema::{PushArtifact, PushKind, PushSpec};
 use crate::infra::{layout, manifest, parquet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

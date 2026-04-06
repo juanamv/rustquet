@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rocksdb::{DB, Options, WriteBatch};
 
 use crate::domain::models::TelemetryEvent;
-use crate::domain::schema::{self, IndexedColumn, SchemaSpec};
+use crate::domain::schema::schema::{self, IndexedColumn, SchemaSpec};
 
 const NEXT_EVENT_ID_KEY: &str = "__meta_next_event_id";
 const NEXT_BATCH_START_ID_KEY: &str = "__meta_next_batch_start_id";

@@ -14,7 +14,7 @@ use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 
 use crate::domain::models::TelemetryEvent;
-use crate::domain::schema::{self, ColumnType, SchemaSpec};
+use crate::domain::schema::schema::{self, ColumnType, SchemaSpec};
 use crate::infra::layout;
 use crate::infra::storage::ActiveBatch;
 
