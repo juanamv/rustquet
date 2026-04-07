@@ -61,30 +61,50 @@ impl ActiveBatchStatus {
     }
 }
 
-// RocksDB uses at most ROCKSDB_MEMORY_FRACTION of total system RAM.
-// block cache gets 2/3 of that budget; write buffers get the remaining 1/3.
-const ROCKSDB_MEMORY_FRACTION: u64 = 8; // 1/8 of total RAM
-const MIN_BLOCK_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32 MB
-const MAX_BLOCK_CACHE_SIZE: usize = 512 * 1024 * 1024; // 512 MB
-const MIN_WRITE_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16 MB
-const MAX_WRITE_BUFFER_SIZE: usize = 128 * 1024 * 1024; // 128 MB
-const MAX_WRITE_BUFFER_NUMBER: i32 = 2;
-const MAX_OPEN_FILES: i32 = 512;
+/// Fraction of total system RAM allocated to RocksDB (1/8 = 12.5%).
+const ROCKSDB_MEMORY_FRACTION: u64 = 8;
+/// Recommended total RAM assumed when detection fails (4 GB).
+const RECOMMENDED_TOTAL_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-struct RocksDbMemoryConfig {
+/// RocksDB memory configuration computed from system RAM.
+///
+/// All values are derived proportionally — no hardcoded min/max limits.
+/// The budget (total_ram / 8) is split: 2/3 for block cache, 1/3 for write
+/// buffers. `write_buffer_number` and `max_open_files` scale with the budget
+/// so small machines stay lean and large machines get more concurrency.
+pub(crate) struct RocksDbMemoryConfig {
     block_cache_size: usize,
     write_buffer_size: usize,
+    write_buffer_number: i32,
+    max_open_files: i32,
 }
 
-fn rocksdb_memory_config_from_total_memory(total_memory_bytes: u64) -> RocksDbMemoryConfig {
+pub(crate) fn rocksdb_memory_config_from_total_memory(
+    total_memory_bytes: u64,
+) -> RocksDbMemoryConfig {
     let budget = total_memory_bytes / ROCKSDB_MEMORY_FRACTION;
-    let block_cache_size =
-        ((budget * 2 / 3) as usize).clamp(MIN_BLOCK_CACHE_SIZE, MAX_BLOCK_CACHE_SIZE);
-    let write_buffer_size =
-        ((budget / 3) as usize).clamp(MIN_WRITE_BUFFER_SIZE, MAX_WRITE_BUFFER_SIZE);
+
+    let block_cache_size = (budget * 2 / 3) as usize;
+    let write_buffer_size = (budget / 3) as usize;
+
+    // Scale write buffer count: 2 up to 8 GB budget, 3 up to 32 GB, 4 above.
+    let write_buffer_number = if budget < 8 * 1024 * 1024 * 1024 {
+        2
+    } else if budget < 32 * 1024 * 1024 * 1024 {
+        3
+    } else {
+        4
+    };
+
+    // Scale max open files: 256 per GB of budget, clamped to [128, 2048].
+    let open_files_raw = (budget / (1024 * 1024 * 1024)) * 256;
+    let max_open_files = (open_files_raw as i32).clamp(128, 2048);
+
     RocksDbMemoryConfig {
         block_cache_size,
         write_buffer_size,
+        write_buffer_number,
+        max_open_files,
     }
 }
 
@@ -95,10 +115,7 @@ fn rocksdb_memory_config() -> RocksDbMemoryConfig {
     if total > 0 {
         rocksdb_memory_config_from_total_memory(total)
     } else {
-        RocksDbMemoryConfig {
-            block_cache_size: MIN_BLOCK_CACHE_SIZE,
-            write_buffer_size: MIN_WRITE_BUFFER_SIZE,
-        }
+        rocksdb_memory_config_from_total_memory(RECOMMENDED_TOTAL_MEMORY_BYTES)
     }
 }
 
@@ -109,8 +126,8 @@ pub fn open_db(path: &str) -> Result<Arc<DB>, Box<dyn std::error::Error + Send +
     opts.create_if_missing(true);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
     opts.set_write_buffer_size(mem.write_buffer_size);
-    opts.set_max_write_buffer_number(MAX_WRITE_BUFFER_NUMBER);
-    opts.set_max_open_files(MAX_OPEN_FILES);
+    opts.set_max_write_buffer_number(mem.write_buffer_number);
+    opts.set_max_open_files(mem.max_open_files);
 
     let cache = Cache::new_lru_cache(mem.block_cache_size);
     let mut block_opts = BlockBasedOptions::default();
