@@ -6,7 +6,7 @@ use tracing::warn;
 use crate::domain::schema;
 
 pub const BATCH_SIZE: u64 = 10_000;
-pub const BATCH_MAX_AGE_MS: u64 = 0;
+pub const BATCH_MAX_AGE_SECS: u64 = 0;
 pub const INGEST_CHANNEL_CAPACITY: usize = 8_192;
 pub const MAX_INGEST_CHANNEL_CAPACITY: usize = 65_536;
 pub const PARQUET_CHANNEL_CAPACITY: usize = 1;
@@ -39,7 +39,7 @@ const SERVER_ADDR_ENV: &str = "SERVER_ADDR";
 const DB_PATH_ENV: &str = "DB_PATH";
 const PARQUET_OUTPUT_DIR_ENV: &str = "PARQUET_OUTPUT_DIR";
 const BATCH_SIZE_ENV: &str = "BATCH_SIZE";
-const BATCH_MAX_AGE_MS_ENV: &str = "BATCH_MAX_AGE_MS";
+const BATCH_MAX_AGE_SECS_ENV: &str = "BATCH_MAX_AGE_SECS";
 const INGEST_CHANNEL_CAPACITY_ENV: &str = "INGEST_CHANNEL_CAPACITY";
 const PARQUET_CHANNEL_CAPACITY_ENV: &str = "PARQUET_CHANNEL_CAPACITY";
 const SCHEMA_CONFIG_PATH_ENV: &str = "SCHEMA_CONFIG_PATH";
@@ -51,7 +51,7 @@ pub struct RuntimeConfig {
     pub db_path: String,
     pub parquet_output_dir: String,
     pub batch_size: u64,
-    pub batch_max_age_ms: u64,
+    pub batch_max_age_secs: u64,
     pub ingest_channel_capacity: usize,
     pub parquet_channel_capacity: usize,
     pub schema_config_path: String,
@@ -113,19 +113,19 @@ fn optional_string_from_env(
 
 fn parse_batch_size(
     env_getter: &dyn Fn(&str) -> Option<String>,
-    batch_max_age_ms: u64,
+    batch_max_age_secs: u64,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = match env_getter(BATCH_SIZE_ENV) {
         Some(value) => value.parse::<u64>().map_err(|error| {
             invalid_input(format!("invalid value for {BATCH_SIZE_ENV}: {error}"))
         })?,
-        None if batch_max_age_ms > 0 => 0,
+        None if batch_max_age_secs > 0 => 0,
         None => BATCH_SIZE,
     };
 
-    if batch_size == 0 && batch_max_age_ms == 0 {
+    if batch_size == 0 && batch_max_age_secs == 0 {
         return Err(invalid_input(
-            "count batching is disabled because BATCH_SIZE is 0, but BATCH_MAX_AGE_MS is also 0; enable at least one batch trigger",
+            "count batching is disabled because BATCH_SIZE is 0, but BATCH_MAX_AGE_SECS is also 0; enable at least one batch trigger",
         )
         .into());
     }
@@ -205,9 +205,9 @@ where
     I: IntoIterator<Item = String>,
     F: Fn(&str) -> Option<String>,
 {
-    let batch_max_age_ms =
-        parse_from_env_or_default(&env_getter, BATCH_MAX_AGE_MS_ENV, BATCH_MAX_AGE_MS)?;
-    let batch_size = parse_batch_size(&env_getter, batch_max_age_ms)?;
+    let batch_max_age_secs =
+        parse_from_env_or_default(&env_getter, BATCH_MAX_AGE_SECS_ENV, BATCH_MAX_AGE_SECS)?;
+    let batch_size = parse_batch_size(&env_getter, batch_max_age_secs)?;
 
     let effective_batch_size = if batch_size == 0 {
         BATCH_SIZE
@@ -226,7 +226,7 @@ where
             PARQUET_OUTPUT_DIR,
         ),
         batch_size,
-        batch_max_age_ms,
+        batch_max_age_secs,
         ingest_channel_capacity: parse_from_env_or_else(
             &env_getter,
             INGEST_CHANNEL_CAPACITY_ENV,

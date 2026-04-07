@@ -103,12 +103,12 @@ fn sync_pending_batch_opened_at_ms(
 }
 
 fn timeout_expired(
-    batch_max_age_ms: u64,
+    batch_max_age_secs: u64,
     pending_batch_opened_at_ms: Option<u64>,
     next_event_id: u64,
     next_batch_start_id: u64,
 ) -> bool {
-    if batch_max_age_ms == 0 || next_event_id == next_batch_start_id {
+    if batch_max_age_secs == 0 || next_event_id == next_batch_start_id {
         return false;
     }
 
@@ -116,20 +116,21 @@ fn timeout_expired(
         return false;
     };
 
-    now_unix_ms().saturating_sub(opened_at_ms) >= batch_max_age_ms
+    now_unix_ms().saturating_sub(opened_at_ms) >= batch_max_age_secs.saturating_mul(1000)
 }
 
 fn next_timeout_wait(
-    batch_max_age_ms: u64,
+    batch_max_age_secs: u64,
     pending_batch_opened_at_ms: Option<u64>,
     next_event_id: u64,
     next_batch_start_id: u64,
 ) -> Option<Duration> {
-    if batch_max_age_ms == 0 || next_event_id == next_batch_start_id {
+    if batch_max_age_secs == 0 || next_event_id == next_batch_start_id {
         return None;
     }
 
     let opened_at_ms = pending_batch_opened_at_ms?;
+    let batch_max_age_ms = batch_max_age_secs.saturating_mul(1000);
     let elapsed_ms = now_unix_ms().saturating_sub(opened_at_ms);
     if elapsed_ms >= batch_max_age_ms {
         None
@@ -143,7 +144,7 @@ pub async fn run_ingest_actor(
     mut rx: mpsc::Receiver<IngestCmd>,
     parquet_tx: mpsc::Sender<ParquetCmd>,
     batch_size: u64,
-    batch_max_age_ms: u64,
+    batch_max_age_secs: u64,
     schema_version: u32,
 ) {
     let metadata =
@@ -168,7 +169,7 @@ pub async fn run_ingest_actor(
                 Some(batch)
             } else {
                 let batch_timeout_expired = timeout_expired(
-                    batch_max_age_ms,
+                    batch_max_age_secs,
                     pending_batch_opened_at_ms,
                     next_event_id,
                     next_batch_start_id,
@@ -235,7 +236,7 @@ pub async fn run_ingest_actor(
 
         let next_event = if !parquet_in_flight && active_batch.is_none() {
             match next_timeout_wait(
-                batch_max_age_ms,
+                batch_max_age_secs,
                 pending_batch_opened_at_ms,
                 next_event_id,
                 next_batch_start_id,

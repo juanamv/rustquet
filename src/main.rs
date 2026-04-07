@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ingest_rx,
         parquet_tx,
         runtime.batch_size,
-        runtime.batch_max_age_ms,
+        runtime.batch_max_age_secs,
         active_schema.version,
     ));
     tokio::spawn(actors::run_parquet_actor(
@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             runtime.batch_size.to_string()
         }
     );
-    info!("  batch_max_age_ms={}", runtime.batch_max_age_ms);
+    info!("  batch_max_age_secs={}", runtime.batch_max_age_secs);
     info!(
         "  ingest_channel_capacity={}",
         runtime.ingest_channel_capacity

@@ -47,7 +47,7 @@ impl BenchHarness {
             db_path: db_path.clone(),
             parquet_output_dir: output_dir.clone(),
             batch_size,
-            batch_max_age_ms: config::BATCH_MAX_AGE_MS,
+            batch_max_age_secs: config::BATCH_MAX_AGE_SECS,
             ingest_channel_capacity: config::INGEST_CHANNEL_CAPACITY,
             parquet_channel_capacity: config::PARQUET_CHANNEL_CAPACITY,
             schema_config_path: schema::DEFAULT_CONFIG_PATH.to_string(),
@@ -71,7 +71,7 @@ impl BenchHarness {
                 ingest_rx,
                 parquet_tx,
                 batch_size,
-                config::BATCH_MAX_AGE_MS,
+                config::BATCH_MAX_AGE_SECS,
                 active_schema.version,
             ));
             tokio::spawn(actors::run_parquet_actor(

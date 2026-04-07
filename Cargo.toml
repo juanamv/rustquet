@@ -1,8 +1,8 @@
 [package]
 name = "rustquet"
-version = "0.1.4"
+version = "0.1.8"
 edition = "2024"
-description = "Telemetry ingestion service backed by RocksDB with Parquet batch output"
+description = "Ingestion service"
 readme = "README.MD"
 repository = "https://github.com/<owner>/<repo>"
 license = "MIT"
