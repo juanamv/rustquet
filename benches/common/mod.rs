@@ -42,6 +42,21 @@ impl BenchHarness {
         let parquet_dir = temp_dir.path().join("parquet_output");
         let manifest_dir = temp_dir.path().join("manifests");
         let output_dir = parquet_dir.to_string_lossy().into_owned();
+        let runtime_config = config::RuntimeConfig {
+            server_addr: config::SERVER_ADDR.to_string(),
+            db_path: db_path.clone(),
+            parquet_output_dir: output_dir.clone(),
+            batch_size,
+            batch_max_age_ms: config::BATCH_MAX_AGE_MS,
+            ingest_channel_capacity: config::INGEST_CHANNEL_CAPACITY,
+            parquet_channel_capacity: config::PARQUET_CHANNEL_CAPACITY,
+            schema_config_path: schema::DEFAULT_CONFIG_PATH.to_string(),
+            ingest_bearer_token: Some(BENCH_BEARER_TOKEN.to_string()),
+            max_event_metadata_bytes: 0,
+            max_request_body_bytes: 0,
+        };
+        let memory_budget = config::validate_memory_budget(&runtime_config)
+            .expect("failed to compute benchmark memory budget");
         let active_schema = schema::load_default_schema().expect("failed to load benchmark schema");
         let schemas = Arc::new(
             storage::ensure_schema(&db, &active_schema)
@@ -73,6 +88,7 @@ impl BenchHarness {
         let app = routes::router(routes::AppState {
             ingest_tx: ingest_tx.clone(),
             bearer_token: Some(Arc::<str>::from(BENCH_BEARER_TOKEN)),
+            max_event_metadata_bytes: memory_budget.max_event_metadata_bytes,
         });
 
         Self {
