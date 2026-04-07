@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rocksdb::DB;
 use rustquet::{actors, config, routes, schema, storage, uploader};
 use tokio::sync::mpsc;
 use tracing::info;
@@ -22,6 +23,28 @@ impl std::error::Error for UserFacingError {}
 
 fn user_facing_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(UserFacingError(message.into()))
+}
+
+fn build_app_state(
+    db: Arc<DB>,
+    ingest_tx: mpsc::Sender<actors::IngestCmd>,
+    bearer_token: Option<Arc<str>>,
+    runtime: &config::RuntimeConfig,
+    schema_version: u32,
+    write_manifest: bool,
+    push_target_count: usize,
+) -> routes::AppState {
+    routes::AppState {
+        ingest_tx,
+        bearer_token,
+        db,
+        server_stats: Arc::new(routes::ServerStats::from_runtime(
+            runtime,
+            schema_version,
+            write_manifest,
+            push_target_count,
+        )),
+    }
 }
 
 #[tokio::main]
@@ -79,17 +102,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         push_targets.clone(),
     ));
 
-    let bearer_token = runtime.ingest_bearer_token.map(Arc::<str>::from);
+    let bearer_token = runtime.ingest_bearer_token.clone().map(Arc::<str>::from);
     let bearer_auth_enabled = bearer_token.is_some();
     if !bearer_auth_enabled {
         println!("INGEST_BEARER_TOKEN not set; bearer auth disabled");
     }
 
-    let state = routes::AppState {
+    let state = build_app_state(
+        db.clone(),
         ingest_tx,
         bearer_token,
-        max_event_metadata_bytes: runtime.max_event_metadata_bytes,
-    };
+        &runtime,
+        active_schema.version,
+        write_manifest,
+        push_targets.len(),
+    );
     let app = routes::router(state);
 
     info!("rustquet runtime configuration:");

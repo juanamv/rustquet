@@ -88,7 +88,17 @@ impl BenchHarness {
         let app = routes::router(routes::AppState {
             ingest_tx: ingest_tx.clone(),
             bearer_token: Some(Arc::<str>::from(BENCH_BEARER_TOKEN)),
-            max_event_metadata_bytes: memory_budget.max_event_metadata_bytes,
+            db: db.clone(),
+            server_stats: Arc::new(routes::ServerStats::from_runtime(
+                &config::RuntimeConfig {
+                    max_event_metadata_bytes: memory_budget.max_event_metadata_bytes,
+                    max_request_body_bytes: memory_budget.max_request_body_bytes,
+                    ..runtime_config
+                },
+                active_schema.version,
+                write_manifest,
+                0,
+            )),
         });
 
         Self {
