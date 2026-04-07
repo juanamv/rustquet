@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
-use rocksdb::{DB, Options, WriteBatch};
+use rocksdb::{BlockBasedOptions, Cache, DB, Options, WriteBatch};
+use sysinfo::System;
 
 use crate::domain::models::TelemetryEvent;
 use crate::domain::schema::{self, IndexedColumn, SchemaSpec};
@@ -60,10 +61,59 @@ impl ActiveBatchStatus {
     }
 }
 
+// RocksDB uses at most ROCKSDB_MEMORY_FRACTION of total system RAM.
+// block cache gets 2/3 of that budget; write buffers get the remaining 1/3.
+const ROCKSDB_MEMORY_FRACTION: u64 = 8; // 1/8 of total RAM
+const MIN_BLOCK_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+const MAX_BLOCK_CACHE_SIZE: usize = 512 * 1024 * 1024; // 512 MB
+const MIN_WRITE_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+const MAX_WRITE_BUFFER_SIZE: usize = 128 * 1024 * 1024; // 128 MB
+const MAX_WRITE_BUFFER_NUMBER: i32 = 2;
+const MAX_OPEN_FILES: i32 = 512;
+
+struct RocksDbMemoryConfig {
+    block_cache_size: usize,
+    write_buffer_size: usize,
+}
+
+fn rocksdb_memory_config_from_total_memory(total_memory_bytes: u64) -> RocksDbMemoryConfig {
+    let budget = total_memory_bytes / ROCKSDB_MEMORY_FRACTION;
+    let block_cache_size = ((budget * 2 / 3) as usize)
+        .clamp(MIN_BLOCK_CACHE_SIZE, MAX_BLOCK_CACHE_SIZE);
+    let write_buffer_size = ((budget / 3) as usize)
+        .clamp(MIN_WRITE_BUFFER_SIZE, MAX_WRITE_BUFFER_SIZE);
+    RocksDbMemoryConfig { block_cache_size, write_buffer_size }
+}
+
+fn rocksdb_memory_config() -> RocksDbMemoryConfig {
+    let mut system = System::new();
+    system.refresh_memory();
+    let total = system.total_memory();
+    if total > 0 {
+        rocksdb_memory_config_from_total_memory(total)
+    } else {
+        RocksDbMemoryConfig {
+            block_cache_size: MIN_BLOCK_CACHE_SIZE,
+            write_buffer_size: MIN_WRITE_BUFFER_SIZE,
+        }
+    }
+}
+
 pub fn open_db(path: &str) -> Result<Arc<DB>, Box<dyn std::error::Error + Send + Sync>> {
+    let mem = rocksdb_memory_config();
+
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+    opts.set_write_buffer_size(mem.write_buffer_size);
+    opts.set_max_write_buffer_number(MAX_WRITE_BUFFER_NUMBER);
+    opts.set_max_open_files(MAX_OPEN_FILES);
+
+    let cache = Cache::new_lru_cache(mem.block_cache_size);
+    let mut block_opts = BlockBasedOptions::default();
+    block_opts.set_block_cache(&cache);
+    opts.set_block_based_table_factory(&block_opts);
+
     let db = DB::open(&opts, path)?;
     Ok(Arc::new(db))
 }
