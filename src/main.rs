@@ -53,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         |key| std::env::var(key).ok(),
     )?);
 
+    let budget = config::validate_memory_budget(&runtime)?;
+
     let (ingest_tx, ingest_rx) = mpsc::channel(runtime.ingest_channel_capacity);
     let (parquet_tx, parquet_rx) = mpsc::channel(runtime.parquet_channel_capacity);
 
@@ -86,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = routes::AppState {
         ingest_tx,
         bearer_token,
+        max_event_metadata_bytes: runtime.max_event_metadata_bytes,
     };
     let app = routes::router(state);
 
@@ -139,6 +142,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("  push[{index}].region={}", push_target.region());
     }
     info!("  schema_version={}", active_schema.version);
+    if budget.total_memory_bytes > 0 {
+        info!("  memory_budget:");
+        info!(
+            "    total_system_ram={} MB",
+            budget.total_memory_bytes / (1024 * 1024)
+        );
+        info!(
+            "    rustquet_budget={} MB",
+            budget.rustquet_budget_bytes / (1024 * 1024)
+        );
+        info!(
+            "    rocksdb_estimate={} MB",
+            budget.rocksdb_bytes / (1024 * 1024)
+        );
+        info!(
+            "    channel_budget={} MB",
+            budget.channel_bytes / (1024 * 1024)
+        );
+        info!(
+            "    batch_peak_budget={} MB",
+            budget.batch_peak_bytes / (1024 * 1024)
+        );
+    }
+    info!(
+        "  max_event_metadata_bytes={}",
+        runtime.max_event_metadata_bytes
+    );
+    info!(
+        "  max_request_body_bytes={}",
+        runtime.max_request_body_bytes
+    );
 
     let listener = tokio::net::TcpListener::bind(&runtime.server_addr).await?;
     info!("rustquet listening on {}", runtime.server_addr);

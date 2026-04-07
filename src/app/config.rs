@@ -1,6 +1,7 @@
 use std::io::{Error, ErrorKind};
 
 use sysinfo::System;
+use tracing::warn;
 
 use crate::domain::schema;
 
@@ -18,6 +19,21 @@ const MIN_INGEST_CHANNEL_MEMORY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INGEST_CHANNEL_MEMORY_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 const INGEST_CHANNEL_MEMORY_FRACTION_DIVISOR: u64 = 100;
 const CHANNEL_CAPACITY_ROUNDING: usize = 1_024;
+
+/// Fallback per-event metadata limit when system RAM detection fails.
+const BASE_EVENT_METADATA_BYTES: usize = 64 * 1024;
+/// Fallback max HTTP request body when system RAM detection fails.
+const BASE_REQUEST_BODY_BYTES: usize = 65 * 1024;
+/// Fraction of total RAM reserved for rustquet (1/4 = 25%).
+const RUSTQUET_MEMORY_FRACTION_DIVISOR: u64 = 4;
+/// Of the available budget, fraction for channel memory (40%).
+const CHANNEL_BUDGET_PERCENT: u64 = 40;
+/// Of the available budget, fraction for batch peak memory (50%).
+const BATCH_PEAK_BUDGET_PERCENT: u64 = 50;
+/// Multiplier for batch peak: deserialized + Arrow arrays + overhead.
+const BATCH_PEAK_MULTIPLIER: u64 = 3;
+/// Fixed-field overhead per event (id, path, event_name, timestamp).
+const EVENT_FIXED_OVERHEAD_BYTES: usize = 1024;
 
 const SERVER_ADDR_ENV: &str = "SERVER_ADDR";
 const DB_PATH_ENV: &str = "DB_PATH";
@@ -40,6 +56,21 @@ pub struct RuntimeConfig {
     pub parquet_channel_capacity: usize,
     pub schema_config_path: String,
     pub ingest_bearer_token: Option<String>,
+    pub max_event_metadata_bytes: usize,
+    pub max_request_body_bytes: usize,
+}
+
+/// Breakdown of memory usage computed from system RAM and runtime config.
+#[derive(Debug, Clone)]
+pub struct MemoryBudget {
+    pub total_memory_bytes: u64,
+    pub rustquet_budget_bytes: u64,
+    pub rocksdb_bytes: u64,
+    pub available_bytes: u64,
+    pub channel_bytes: u64,
+    pub batch_peak_bytes: u64,
+    pub max_event_metadata_bytes: usize,
+    pub max_request_body_bytes: usize,
 }
 
 fn invalid_input(message: impl Into<String>) -> Error {
@@ -178,6 +209,14 @@ where
         parse_from_env_or_default(&env_getter, BATCH_MAX_AGE_MS_ENV, BATCH_MAX_AGE_MS)?;
     let batch_size = parse_batch_size(&env_getter, batch_max_age_ms)?;
 
+    let effective_batch_size = if batch_size == 0 {
+        BATCH_SIZE
+    } else {
+        batch_size
+    };
+    let budget =
+        compute_memory_budget_from_total_memory(detect_total_memory_bytes(), effective_batch_size);
+
     Ok(RuntimeConfig {
         server_addr: string_from_env_or_default(&env_getter, SERVER_ADDR_ENV, SERVER_ADDR),
         db_path: string_from_env_or_default(&env_getter, DB_PATH_ENV, DB_PATH),
@@ -202,6 +241,8 @@ where
             .or_else(|| env_getter(SCHEMA_CONFIG_PATH_ENV))
             .unwrap_or_else(|| schema::DEFAULT_CONFIG_PATH.to_string()),
         ingest_bearer_token: optional_string_from_env(&env_getter, INGEST_BEARER_TOKEN_ENV),
+        max_event_metadata_bytes: budget.max_event_metadata_bytes,
+        max_request_body_bytes: budget.max_request_body_bytes,
     })
 }
 
@@ -213,4 +254,98 @@ where
 {
     let _ = dotenvy::dotenv();
     load_runtime_config_from_env(args, |key| std::env::var(key).ok())
+}
+
+/// Computes memory budget and dynamic limits from total system RAM and batch
+/// size. When `total_memory` is `None` (detection failed), base fallback
+/// values are used instead.
+pub(crate) fn compute_memory_budget_from_total_memory(
+    total_memory: Option<u64>,
+    batch_size: u64,
+) -> MemoryBudget {
+    let Some(total) = total_memory.filter(|&t| t > 0) else {
+        return MemoryBudget {
+            total_memory_bytes: 0,
+            rustquet_budget_bytes: 0,
+            rocksdb_bytes: 0,
+            available_bytes: 0,
+            channel_bytes: 0,
+            batch_peak_bytes: 0,
+            max_event_metadata_bytes: BASE_EVENT_METADATA_BYTES,
+            max_request_body_bytes: BASE_REQUEST_BODY_BYTES,
+        };
+    };
+
+    let rustquet_budget = total / RUSTQUET_MEMORY_FRACTION_DIVISOR;
+    let rocksdb_bytes = total / 8; // mirrors ROCKSDB_MEMORY_FRACTION in storage.rs
+    let available = rustquet_budget.saturating_sub(rocksdb_bytes);
+
+    let channel_bytes = available * CHANNEL_BUDGET_PERCENT / 100;
+    let batch_peak_bytes = available * BATCH_PEAK_BUDGET_PERCENT / 100;
+
+    let effective_batch_size = batch_size.max(1);
+    let max_meta = batch_peak_bytes / (effective_batch_size * BATCH_PEAK_MULTIPLIER);
+    let max_event_metadata_bytes = usize::try_from(max_meta)
+        .unwrap_or(BASE_EVENT_METADATA_BYTES)
+        .max(1024); // floor at 1 KB so tiny machines don't reject everything
+    let max_request_body_bytes = max_event_metadata_bytes + EVENT_FIXED_OVERHEAD_BYTES;
+
+    MemoryBudget {
+        total_memory_bytes: total,
+        rustquet_budget_bytes: rustquet_budget,
+        rocksdb_bytes,
+        available_bytes: available,
+        channel_bytes,
+        batch_peak_bytes,
+        max_event_metadata_bytes,
+        max_request_body_bytes,
+    }
+}
+
+/// Computes the memory budget for the given runtime config and logs the
+/// breakdown. Returns an error if the estimated peak usage exceeds system RAM.
+pub fn validate_memory_budget(
+    runtime: &RuntimeConfig,
+) -> Result<MemoryBudget, Box<dyn std::error::Error + Send + Sync>> {
+    let effective_batch_size = if runtime.batch_size == 0 {
+        BATCH_SIZE
+    } else {
+        runtime.batch_size
+    };
+
+    let budget =
+        compute_memory_budget_from_total_memory(detect_total_memory_bytes(), effective_batch_size);
+
+    if budget.total_memory_bytes == 0 {
+        warn!("could not detect system memory; using base fallback limits");
+        warn!(
+            "  max_event_metadata_bytes={}",
+            budget.max_event_metadata_bytes
+        );
+        warn!("  max_request_body_bytes={}", budget.max_request_body_bytes);
+        return Ok(budget);
+    }
+
+    let total_mb = budget.total_memory_bytes / (1024 * 1024);
+    let estimated_peak = budget.rocksdb_bytes + budget.channel_bytes + budget.batch_peak_bytes;
+
+    if estimated_peak > budget.total_memory_bytes {
+        return Err(invalid_input(format!(
+            "estimated peak memory ({} MB) exceeds total system RAM ({} MB); \
+             reduce BATCH_SIZE or INGEST_CHANNEL_CAPACITY",
+            estimated_peak / (1024 * 1024),
+            total_mb,
+        ))
+        .into());
+    }
+
+    let usage_percent = estimated_peak * 100 / budget.total_memory_bytes;
+    if usage_percent > 80 {
+        warn!(
+            "estimated peak memory is {}% of system RAM ({} MB); consider reducing BATCH_SIZE",
+            usage_percent, total_mb
+        );
+    }
+
+    Ok(budget)
 }

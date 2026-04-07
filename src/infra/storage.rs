@@ -78,11 +78,14 @@ struct RocksDbMemoryConfig {
 
 fn rocksdb_memory_config_from_total_memory(total_memory_bytes: u64) -> RocksDbMemoryConfig {
     let budget = total_memory_bytes / ROCKSDB_MEMORY_FRACTION;
-    let block_cache_size = ((budget * 2 / 3) as usize)
-        .clamp(MIN_BLOCK_CACHE_SIZE, MAX_BLOCK_CACHE_SIZE);
-    let write_buffer_size = ((budget / 3) as usize)
-        .clamp(MIN_WRITE_BUFFER_SIZE, MAX_WRITE_BUFFER_SIZE);
-    RocksDbMemoryConfig { block_cache_size, write_buffer_size }
+    let block_cache_size =
+        ((budget * 2 / 3) as usize).clamp(MIN_BLOCK_CACHE_SIZE, MAX_BLOCK_CACHE_SIZE);
+    let write_buffer_size =
+        ((budget / 3) as usize).clamp(MIN_WRITE_BUFFER_SIZE, MAX_WRITE_BUFFER_SIZE);
+    RocksDbMemoryConfig {
+        block_cache_size,
+        write_buffer_size,
+    }
 }
 
 fn rocksdb_memory_config() -> RocksDbMemoryConfig {

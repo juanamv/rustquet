@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::extract::rejection::JsonRejection;
 use axum::{
     Json, Router,
@@ -20,11 +21,14 @@ use crate::domain::models::TelemetryEvent;
 pub struct AppState {
     pub ingest_tx: mpsc::Sender<IngestCmd>,
     pub bearer_token: Option<Arc<str>>,
+    pub max_event_metadata_bytes: usize,
 }
 
 pub fn router(state: AppState) -> Router {
+    let body_limit = state.max_event_metadata_bytes;
     Router::new()
         .route("/ingest", post(ingest_handler))
+        .layer(DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer_auth,
@@ -47,6 +51,16 @@ async fn ingest_handler(
             return StatusCode::BAD_REQUEST;
         }
     };
+
+    let metadata_size = event.metadata.to_string().len();
+    if metadata_size > state.max_event_metadata_bytes {
+        warn!(
+            metadata_bytes = metadata_size,
+            limit = state.max_event_metadata_bytes,
+            "event metadata exceeds dynamic size limit"
+        );
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
 
     let (ack_tx, ack_rx) = oneshot::channel();
 

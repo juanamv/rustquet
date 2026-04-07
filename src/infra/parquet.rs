@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::path::PathBuf;
@@ -309,14 +309,13 @@ fn write_single_parquet_file(
         .set_compression(Compression::SNAPPY)
         .build();
 
-    let mut buffer = Vec::new();
+    let file = File::create(temp_path)?;
     {
-        let mut writer = ArrowWriter::try_new(Cursor::new(&mut buffer), schema, Some(props))?;
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
         writer.write(&batch)?;
         writer.close()?;
     }
 
-    std::fs::write(temp_path, &buffer)?;
     std::fs::rename(temp_path, final_path)?;
 
     Ok(())
